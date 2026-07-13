@@ -26,7 +26,7 @@ import (
 	"github.com/ziozzang/hfdownload/internal/state"
 )
 
-const version = "0.2.4"
+const version = "0.2.5"
 
 type settings struct {
 	Endpoint           string   `json:"endpoint"`
@@ -116,7 +116,7 @@ func run(ctx context.Context, args []string) error {
 }
 
 func printVersion(w io.Writer) {
-	fmt.Fprintf(w, "hfdown %s (%s/%s)\nCreated by Jioh L. Jung <ziozzang@gmail.com>\n", version, runtime.GOOS, runtime.GOARCH)
+	fmt.Fprintf(w, "hfdown %s (%s/%s)\nCreated by Jioh L. Jung <ziozzang@gmail.com>\nGitHub: https://github.com/ziozzang/hfdownload\n", version, runtime.GOOS, runtime.GOARCH)
 }
 
 func helpCommand(ctx context.Context, args []string) error {

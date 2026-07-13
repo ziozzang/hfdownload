@@ -2,7 +2,7 @@
 
 한국어 | [English](README.md)
 
-Created by Jioh L. Jung <ziozzang@gmail.com>
+Created by Jioh L. Jung <ziozzang@gmail.com> — [GitHub](https://github.com/ziozzang/hfdownload)
 
 `hfdown`은 Hugging Face의 모델과 데이터셋 리포지터리를 낮은 리소스로
 다운로드하는 프로그램입니다. 중단된 다운로드 이어받기와 HTTP Range 분할
