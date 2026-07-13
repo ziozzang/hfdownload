@@ -25,7 +25,7 @@ import (
 	"github.com/ziozzang/hfdownload/internal/state"
 )
 
-const version = "0.2.0"
+const version = "0.2.1"
 
 type settings struct {
 	Endpoint           string   `json:"endpoint"`
@@ -421,6 +421,13 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	fmt.Fprintf(os.Stderr, "commit %s\n", info.SHA)
 	fmt.Fprintf(os.Stderr, "plan: %d files • %s total • %d cached (%s) • %d remaining (%s)\n",
 		len(files), humanBytes(total), cachedFiles, humanBytes(cachedBytes), remainingFiles, humanBytes(remainingBytes))
+	// Persist the current known-good set before network transfer, then refresh it
+	// after every file succeeds. An interrupted run therefore leaves a usable
+	// manifest and .sha256 for everything completed so far.
+	m.UpdatedAt = metadataFetchedAt
+	if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
+		return err
+	}
 	overall := progress.New(os.Stderr, total, fmt.Sprintf("%d/%d ready", cachedFiles, len(files)))
 	overall.SetDone(cachedBytes)
 	defer overall.Finish()
@@ -457,7 +464,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 			completedFiles++
 			overall.SetLabel(fmt.Sprintf("%d/%d ready", completedFiles, len(files)))
 			m.UpdatedAt = time.Now().UTC()
-			if err := state.SaveJSONAtomic(manifestPath, m); err != nil {
+			if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
 				return err
 			}
 			overall.Logf("[%d/%d] verified existing %s\n", i+1, len(files), remote.Path)
@@ -480,7 +487,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		completedFiles++
 		overall.SetLabel(fmt.Sprintf("%d/%d ready", completedFiles, len(files)))
 		m.UpdatedAt = time.Now().UTC()
-		if err := state.SaveJSONAtomic(manifestPath, m); err != nil {
+		if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
 			return err
 		}
 	}
@@ -492,10 +499,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		}
 	}
 	m.UpdatedAt = time.Now().UTC()
-	if err := state.SaveJSONAtomic(manifestPath, m); err != nil {
-		return err
-	}
-	if err := state.WriteChecksumFile(filepath.Join(root, ".sha256"), m); err != nil {
+	if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
 		return err
 	}
 	overall.SetLabel(fmt.Sprintf("complete %d/%d", len(files), len(files)))
@@ -504,6 +508,13 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		len(files), cachedFiles, humanBytes(skipped), verifiedExisting, downloadedFiles, humanBytes(networkBytes.Load()), humanBytes(resumedBytes.Load()))
 	fmt.Fprintf(os.Stderr, "saved to %s\n", root)
 	return nil
+}
+
+func saveDownloadCheckpoint(manifestPath, checksumPath string, m *state.Manifest) error {
+	if err := state.SaveJSONAtomic(manifestPath, m); err != nil {
+		return err
+	}
+	return state.WriteChecksumFile(checksumPath, m)
 }
 
 func verifyCommand(args []string) error {

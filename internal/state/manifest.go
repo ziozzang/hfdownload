@@ -180,6 +180,9 @@ func WriteChecksumFile(path string, m *Manifest) error {
 	}
 	fmt.Fprintf(&b, "# hfdown type: %s\n# repo: %s\n# revision: %s\n# commit: %s\n", repoType, m.RepoID, m.Revision, m.CommitSHA)
 	for _, f := range SortedFiles(m) {
+		if f.LocalSHA256 == "" || f.VerificationError != "" {
+			continue
+		}
 		name := f.Path
 		prefix := ""
 		if strings.ContainsAny(name, "\\\n") {

@@ -219,6 +219,8 @@ Resume mode is enabled by default.
 - Multipart ranges write directly to offsets in one `download.part`; no
   model-sized concatenation copy is needed.
 - The final file is promoted only after its complete remote hash matches.
+- After each file succeeds, the manifest and `.sha256` are checkpointed, so an
+  interrupted batch retains checksums for every completed file.
 - If resumed bytes fail the hash, that file is retried once from byte zero.
 - Unchanged files with valid manifest records are not re-read.
 - Files without a current validation record are scanned once before download.

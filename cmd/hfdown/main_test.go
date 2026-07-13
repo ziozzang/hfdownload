@@ -369,6 +369,60 @@ func TestNormalizeDatasetURL(t *testing.T) {
 	}
 }
 
+func TestChecksumCheckpointSurvivesLaterDownloadFailure(t *testing.T) {
+	good := []byte("completed-file")
+	bad := []byte("never-completed")
+	const commit = "4444444444444444444444444444444444444444"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/owner/checkpoint/revision/main":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "owner/checkpoint", "sha": commit,
+				"siblings": []map[string]any{
+					{"rfilename": "a-good.bin", "blobId": gitBlobID(good), "size": len(good)},
+					{"rfilename": "b-fails.bin", "blobId": gitBlobID(bad), "size": len(bad)},
+				},
+			})
+		case "/owner/checkpoint/resolve/" + commit + "/a-good.bin":
+			var start, end int
+			if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+				http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(good)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(good[start : end+1])
+		case "/owner/checkpoint/resolve/" + commit + "/b-fails.bin":
+			http.Error(w, "intentional failure", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "owner_checkpoint")
+	cfg := defaults()
+	cfg.Endpoint, cfg.Output = server.URL, output
+	cfg.Parts, cfg.MultipartThreshold, cfg.Retries = 1, 1, 0
+	if err := syncRepo(context.Background(), cfg, "owner/checkpoint"); err == nil {
+		t.Fatal("expected the second file to fail")
+	}
+	checksums, err := os.ReadFile(filepath.Join(output, ".sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(checksums)
+	if !strings.Contains(text, blobSHA256(good)+"  a-good.bin") {
+		t.Fatalf("successful file missing from checkpoint:\n%s", text)
+	}
+	if strings.Contains(text, "b-fails.bin") {
+		t.Fatalf("failed file present in checkpoint:\n%s", text)
+	}
+	if got, err := os.ReadFile(filepath.Join(output, "a-good.bin")); err != nil || string(got) != string(good) {
+		t.Fatalf("completed file = %q, %v", got, err)
+	}
+}
+
 func gitBlobID(data []byte) string {
 	h := sha1.New()
 	_, _ = fmt.Fprintf(h, "blob %d\x00", len(data))
