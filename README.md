@@ -13,7 +13,7 @@ with HTTP Range requests, and verifies them against Git blob or Git LFS hashes.
 - Multipart HTTP Range downloads with resume enabled by default
 - Constant-size I/O buffers; files are never held entirely in memory
 - Git blob SHA-1 or Git LFS SHA-256 verification for every downloaded file
-- Raw local SHA-256 entries in `<repository>/.sha256`
+- Raw local SHA-256 and SHA-1 entries in `.sha256` and `.sha1sum`
 - Hub metadata snapshots and append-only update/verification history
 - Plain-text lists and per-job JSON queues
 - Recursive batch verification and forced full rehashing
@@ -133,7 +133,7 @@ as an error instead of silently downloading nothing.
 
 A filtered update checks the repository's current commit but only downloads
 selected files whose remote object hashes changed. Previously managed,
-unselected files are retained in the manifest and `.sha256`.
+unselected files are retained in the manifest and checksum files.
 
 ## Important download options
 
@@ -219,8 +219,9 @@ Resume mode is enabled by default.
 - Multipart ranges write directly to offsets in one `download.part`; no
   model-sized concatenation copy is needed.
 - The final file is promoted only after its complete remote hash matches.
-- After each file succeeds, the manifest and `.sha256` are checkpointed, so an
-  interrupted batch retains checksums for every completed file.
+- After each file succeeds, the manifest, `.sha256`, and `.sha1sum` are
+  checkpointed, so an interrupted batch retains checksums for every completed
+  file.
 - If resumed bytes fail the hash, that file is retried once from byte zero.
 - Unchanged files with valid manifest records are not re-read.
 - Files without a current validation record are scanned once before download.
@@ -268,6 +269,7 @@ keeps the download pinned.
 <repository-directory>/
 ├── <downloaded files>
 ├── .sha256
+├── .sha1sum
 ├── .metadata/
 │   ├── manifest.json
 │   ├── repository.json
@@ -279,8 +281,9 @@ keeps the download pinned.
         └── state.json
 ```
 
-`tmp/` is deliberately visible. `tmp/` and `.metadata/` are reserved; a
-remote repository containing either path is rejected. Legacy
+`tmp/` is deliberately visible. `tmp/`, `.metadata/`, `.sha256`, and
+`.sha1sum` are reserved; a remote repository containing these paths is
+rejected. Legacy
 `hfdown-metadata/`, `.hfdown/`, `.metadata/tmp/`, and `.hfdown/partials/`
 layouts are migrated automatically.
 
@@ -291,14 +294,17 @@ layouts are migrated automatically.
 - Normal Git files are checked against Git blob SHA-1
   (`blob <size>\0<content>`).
 - Git LFS files are checked against Hub-provided LFS SHA-256.
-- Every local managed file also receives a raw-content SHA-256 entry.
+- Every local managed file also receives raw-content SHA-256 and SHA-1 entries.
+- Raw SHA-1 in `.sha1sum` is distinct from Git blob SHA-1, which hashes a Git
+  object header together with the content and remains recorded in the manifest.
 
-After a successful download or verification, `.sha256` uses standard
-`sha256sum` syntax:
+After a successful download or verification, both checksum files use standard
+coreutils syntax:
 
 ```bash
 cd ./FluidInference_silero-vad-coreml
 sha256sum -c .sha256
+sha1sum -c .sha1sum
 ```
 
 `.metadata/repository.json` archives the latest Hub API response, repository

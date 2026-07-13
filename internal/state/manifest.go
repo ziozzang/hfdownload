@@ -59,6 +59,7 @@ type FileRecord struct {
 	RemoteBlobSHA1       string     `json:"remote_blob_sha1,omitempty"`
 	RemoteLFSSHA256      string     `json:"remote_lfs_sha256,omitempty"`
 	LocalSHA256          string     `json:"local_sha256"`
+	LocalSHA1            string     `json:"local_sha1,omitempty"`
 	LocalGitSHA1         string     `json:"local_git_sha1,omitempty"`
 	ModTimeUnixNano      int64      `json:"mtime_unix_nano"`
 	VerifiedAt           time.Time  `json:"verified_at"`
@@ -173,14 +174,23 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 func WriteChecksumFile(path string, m *Manifest) error {
+	return writeChecksumFile(path, m, "SHA-256", func(f *FileRecord) string { return f.LocalSHA256 })
+}
+
+func WriteSHA1ChecksumFile(path string, m *Manifest) error {
+	return writeChecksumFile(path, m, "SHA-1", func(f *FileRecord) string { return f.LocalSHA1 })
+}
+
+func writeChecksumFile(path string, m *Manifest, algorithm string, checksum func(*FileRecord) string) error {
 	var b strings.Builder
 	repoType := m.RepoType
 	if repoType == "" {
 		repoType = "model"
 	}
-	fmt.Fprintf(&b, "# hfdown type: %s\n# repo: %s\n# revision: %s\n# commit: %s\n", repoType, m.RepoID, m.Revision, m.CommitSHA)
+	fmt.Fprintf(&b, "# hfdown %s\n# type: %s\n# repo: %s\n# revision: %s\n# commit: %s\n", algorithm, repoType, m.RepoID, m.Revision, m.CommitSHA)
 	for _, f := range SortedFiles(m) {
-		if f.LocalSHA256 == "" || f.VerificationError != "" {
+		hash := checksum(f)
+		if hash == "" || f.VerificationError != "" {
 			continue
 		}
 		name := f.Path
@@ -190,7 +200,7 @@ func WriteChecksumFile(path string, m *Manifest) error {
 			name = strings.ReplaceAll(name, "\\", "\\\\")
 			name = strings.ReplaceAll(name, "\n", "\\n")
 		}
-		fmt.Fprintf(&b, "%s%s  %s\n", prefix, f.LocalSHA256, name)
+		fmt.Fprintf(&b, "%s%s  %s\n", prefix, hash, name)
 	}
 	return WriteFileAtomic(path, []byte(b.String()), 0o644)
 }

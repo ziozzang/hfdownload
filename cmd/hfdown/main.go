@@ -25,7 +25,7 @@ import (
 	"github.com/ziozzang/hfdownload/internal/state"
 )
 
-const version = "0.2.1"
+const version = "0.2.2"
 
 type settings struct {
 	Endpoint           string   `json:"endpoint"`
@@ -423,9 +423,9 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		len(files), humanBytes(total), cachedFiles, humanBytes(cachedBytes), remainingFiles, humanBytes(remainingBytes))
 	// Persist the current known-good set before network transfer, then refresh it
 	// after every file succeeds. An interrupted run therefore leaves a usable
-	// manifest and .sha256 for everything completed so far.
+	// manifest, .sha256, and .sha1sum for everything completed so far.
 	m.UpdatedAt = metadataFetchedAt
-	if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
+	if err := saveDownloadCheckpoint(manifestPath, root, m); err != nil {
 		return err
 	}
 	overall := progress.New(os.Stderr, total, fmt.Sprintf("%d/%d ready", cachedFiles, len(files)))
@@ -464,7 +464,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 			completedFiles++
 			overall.SetLabel(fmt.Sprintf("%d/%d ready", completedFiles, len(files)))
 			m.UpdatedAt = time.Now().UTC()
-			if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
+			if err := saveDownloadCheckpoint(manifestPath, root, m); err != nil {
 				return err
 			}
 			overall.Logf("[%d/%d] verified existing %s\n", i+1, len(files), remote.Path)
@@ -487,7 +487,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		completedFiles++
 		overall.SetLabel(fmt.Sprintf("%d/%d ready", completedFiles, len(files)))
 		m.UpdatedAt = time.Now().UTC()
-		if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
+		if err := saveDownloadCheckpoint(manifestPath, root, m); err != nil {
 			return err
 		}
 	}
@@ -499,7 +499,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		}
 	}
 	m.UpdatedAt = time.Now().UTC()
-	if err := saveDownloadCheckpoint(manifestPath, filepath.Join(root, ".sha256"), m); err != nil {
+	if err := saveDownloadCheckpoint(manifestPath, root, m); err != nil {
 		return err
 	}
 	overall.SetLabel(fmt.Sprintf("complete %d/%d", len(files), len(files)))
@@ -510,11 +510,14 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	return nil
 }
 
-func saveDownloadCheckpoint(manifestPath, checksumPath string, m *state.Manifest) error {
+func saveDownloadCheckpoint(manifestPath, root string, m *state.Manifest) error {
 	if err := state.SaveJSONAtomic(manifestPath, m); err != nil {
 		return err
 	}
-	return state.WriteChecksumFile(checksumPath, m)
+	if err := state.WriteChecksumFile(filepath.Join(root, ".sha256"), m); err != nil {
+		return err
+	}
+	return state.WriteSHA1ChecksumFile(filepath.Join(root, ".sha1sum"), m)
 }
 
 func verifyCommand(args []string) error {
@@ -621,7 +624,7 @@ func verifyDirectory(output string, force bool, buffer int) error {
 			history.Failures = append(history.Failures, rec.Path+": "+statErr.Error())
 			continue
 		}
-		if !force && st.Mode().IsRegular() && st.Size() == rec.Size && st.ModTime().UnixNano() == rec.ModTimeUnixNano {
+		if !force && rec.LocalSHA1 != "" && st.Mode().IsRegular() && st.Size() == rec.Size && st.ModTime().UnixNano() == rec.ModTimeUnixNano {
 			history.Skipped++
 			history.Passed++
 			continue
@@ -630,7 +633,7 @@ func verifyDirectory(output string, force bool, buffer int) error {
 		bar := progress.New(os.Stderr, rec.Size, "verify "+rec.Path)
 		hashes, hashErr := download.HashFileSelective(target, rec.Size, buffer, bar, rec.RemoteLFSSHA256 == "")
 		bar.Finish()
-		if hashErr != nil || !strings.EqualFold(hashes.SHA256, rec.LocalSHA256) || (rec.RemoteLFSSHA256 != "" && !strings.EqualFold(hashes.SHA256, rec.RemoteLFSSHA256)) || (rec.RemoteLFSSHA256 == "" && rec.RemoteBlobSHA1 != "" && !strings.EqualFold(hashes.GitSHA1, rec.RemoteBlobSHA1)) {
+		if hashErr != nil || !strings.EqualFold(hashes.SHA256, rec.LocalSHA256) || (rec.LocalSHA1 != "" && !strings.EqualFold(hashes.SHA1, rec.LocalSHA1)) || (rec.RemoteLFSSHA256 != "" && !strings.EqualFold(hashes.SHA256, rec.RemoteLFSSHA256)) || (rec.RemoteLFSSHA256 == "" && rec.RemoteBlobSHA1 != "" && !strings.EqualFold(hashes.GitSHA1, rec.RemoteBlobSHA1)) {
 			history.Failed++
 			msg := rec.Path + ": hash mismatch"
 			if hashErr != nil {
@@ -642,7 +645,7 @@ func verifyDirectory(output string, force bool, buffer int) error {
 			continue
 		}
 		history.Passed++
-		rec.LocalSHA256, rec.LocalGitSHA1 = hashes.SHA256, hashes.GitSHA1
+		rec.LocalSHA256, rec.LocalSHA1, rec.LocalGitSHA1 = hashes.SHA256, hashes.SHA1, hashes.GitSHA1
 		rec.ModTimeUnixNano, rec.VerifiedAt = st.ModTime().UnixNano(), now
 		rec.VerificationError, rec.VerificationFailedAt = "", nil
 	}
@@ -659,6 +662,9 @@ func verifyDirectory(output string, force bool, buffer int) error {
 	}
 	if history.Failed == 0 {
 		if err := state.WriteChecksumFile(filepath.Join(root, ".sha256"), m); err != nil {
+			return err
+		}
+		if err := state.WriteSHA1ChecksumFile(filepath.Join(root, ".sha1sum"), m); err != nil {
 			return err
 		}
 	}
@@ -817,7 +823,7 @@ func recordCurrent(path string, remote hub.RepoFile, rec *state.FileRecord) bool
 	if remote.LFS != nil {
 		lfs = remote.LFS.SHA256
 	}
-	if rec.RemoteLFSSHA256 != lfs || rec.LocalSHA256 == "" {
+	if rec.RemoteLFSSHA256 != lfs || rec.LocalSHA256 == "" || rec.LocalSHA1 == "" {
 		return false
 	}
 	st, err := os.Stat(path)
@@ -847,7 +853,7 @@ func makeRecord(path string, remote hub.RepoFile, hashes download.Hashes, commit
 		return nil, err
 	}
 	rec := &state.FileRecord{Path: remote.Path, Size: remote.Size, RemoteBlobSHA1: remote.BlobID,
-		LocalSHA256: hashes.SHA256, LocalGitSHA1: hashes.GitSHA1, ModTimeUnixNano: st.ModTime().UnixNano(),
+		LocalSHA256: hashes.SHA256, LocalSHA1: hashes.SHA1, LocalGitSHA1: hashes.GitSHA1, ModTimeUnixNano: st.ModTime().UnixNano(),
 		VerifiedAt: time.Now().UTC(), CommitSHA: commit}
 	if remote.LFS != nil {
 		rec.RemoteLFSSHA256 = remote.LFS.SHA256

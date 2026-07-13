@@ -118,6 +118,10 @@ func TestBatchQueueAndCachedRerun(t *testing.T) {
 	if err != nil || !strings.Contains(string(checksums), blobSHA256(data)+"  model.txt") {
 		t.Fatalf("checksum file missing model hash: %q, %v", checksums, err)
 	}
+	sha1Checksums, err := os.ReadFile(filepath.Join(filepath.Dir(modelPath), ".sha1sum"))
+	if err != nil || !strings.Contains(string(sha1Checksums), rawSHA1(data)+"  model.txt") {
+		t.Fatalf("SHA-1 checksum file missing model hash: %q, %v", sha1Checksums, err)
+	}
 	metadata, err := os.ReadFile(filepath.Join(filepath.Dir(modelPath), ".metadata", "repository.json"))
 	if err != nil || !strings.Contains(string(metadata), `"lastModified": "2026-07-01T12:34:56.000Z"`) || !strings.Contains(string(metadata), `"requested_revision": "main"`) {
 		t.Fatalf("repository metadata not archived: %s, %v", metadata, err)
@@ -138,6 +142,11 @@ func TestBatchQueueAndCachedRerun(t *testing.T) {
 
 func blobSHA256(data []byte) string {
 	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func rawSHA1(data []byte) string {
+	sum := sha1.Sum(data)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -417,6 +426,14 @@ func TestChecksumCheckpointSurvivesLaterDownloadFailure(t *testing.T) {
 	}
 	if strings.Contains(text, "b-fails.bin") {
 		t.Fatalf("failed file present in checkpoint:\n%s", text)
+	}
+	sha1Checksums, err := os.ReadFile(filepath.Join(output, ".sha1sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha1Text := string(sha1Checksums)
+	if !strings.Contains(sha1Text, rawSHA1(good)+"  a-good.bin") || strings.Contains(sha1Text, "b-fails.bin") {
+		t.Fatalf("unexpected SHA-1 checkpoint:\n%s", sha1Text)
 	}
 	if got, err := os.ReadFile(filepath.Join(output, "a-good.bin")); err != nil || string(got) != string(good) {
 		t.Fatalf("completed file = %q, %v", got, err)

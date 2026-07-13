@@ -14,7 +14,7 @@
 - 기본 활성화된 이어받기와 HTTP Range 분할 다운로드
 - 고정 크기 I/O 버퍼 사용; 파일 전체를 메모리에 올리지 않음
 - 파일별 Git blob SHA-1 또는 Git LFS SHA-256 검증
-- 받은 모든 파일의 raw SHA-256을 `<리포>/.sha256`에 저장
+- 받은 모든 파일의 raw SHA-256과 SHA-1을 `.sha256`, `.sha1sum`에 저장
 - Hub 메타데이터 스냅샷과 누적 업데이트/검증 이력
 - 단순 텍스트 목록과 작업별 설정이 가능한 JSON 큐
 - 전체 디렉터리 순회 검증과 강제 전수 재해시
@@ -133,7 +133,7 @@ hfdown d \
 
 필터를 사용한 업데이트는 현재 커밋을 다시 확인하되, 선택된 파일 중 원격
 객체 해시가 변경된 것만 받습니다. 기존에 관리하던 미선택 파일은 manifest와
-`.sha256`에서 제거하지 않습니다.
+체크섬 파일에서 제거하지 않습니다.
 
 ## 주요 다운로드 옵션
 
@@ -219,8 +219,8 @@ hfdown batch --queue queue.json --continue-on-error
 - 여러 Range는 하나의 `download.part` 내 각 위치에 직접 기록하므로 파일
   크기만 한 별도 병합 복사본이 필요하지 않습니다.
 - 전체 원격 해시가 일치해야 최종 경로로 이동합니다.
-- 파일 하나가 성공할 때마다 manifest와 `.sha256`을 갱신하므로 작업이 중단돼도
-  그때까지 완료한 모든 파일의 체크섬이 남습니다.
+- 파일 하나가 성공할 때마다 manifest, `.sha256`, `.sha1sum`을 갱신하므로
+  작업이 중단돼도 그때까지 완료한 모든 파일의 체크섬이 남습니다.
 - 이어받은 데이터의 해시가 틀리면 같은 실행에서 해당 파일만 0부터 한 번
   다시 받습니다.
 - 유효한 manifest 기록이 있고 변경되지 않은 파일은 다시 읽지 않습니다.
@@ -267,6 +267,7 @@ hfdown status --output ./FluidInference_silero-vad-coreml
 <repository-directory>/
 ├── <downloaded files>
 ├── .sha256
+├── .sha1sum
 ├── .metadata/
 │   ├── manifest.json
 │   ├── repository.json
@@ -278,9 +279,9 @@ hfdown status --output ./FluidInference_silero-vad-coreml
         └── state.json
 ```
 
-`tmp/`는 의도적으로 숨김 디렉터리가 아닙니다. `tmp/`와 `.metadata/`는
-`hfdown` 전용 경로이며 원격 리포에 같은 경로가 있으면 충돌 방지를 위해
-중단합니다. 예전 `hfdown-metadata/`, `.hfdown/`, `.metadata/tmp/`,
+`tmp/`는 의도적으로 숨김 디렉터리가 아닙니다. `tmp/`, `.metadata/`,
+`.sha256`, `.sha1sum`은 `hfdown` 전용 경로이며 원격 리포에 같은 경로가
+있으면 충돌 방지를 위해 중단합니다. 예전 `hfdown-metadata/`, `.hfdown/`, `.metadata/tmp/`,
 `.hfdown/partials/` 구조는 자동으로 이전합니다.
 
 ## 해시와 메타데이터 정책
@@ -289,13 +290,16 @@ hfdown status --output ./FluidInference_silero-vad-coreml
 - 모든 파일 URL에 확정된 커밋을 사용합니다.
 - 일반 Git 파일은 Git blob SHA-1(`blob <size>\0<content>`)로 검사합니다.
 - Git LFS 파일은 Hub가 제공한 LFS SHA-256으로 검사합니다.
-- 관리하는 모든 로컬 파일에 raw-content SHA-256도 별도로 기록합니다.
+- 관리하는 모든 로컬 파일에 raw-content SHA-256과 SHA-1도 별도로 기록합니다.
+- `.sha1sum`의 raw SHA-1은 Git 객체 헤더까지 포함해 계산하는 Git blob SHA-1과
+  다르며, Git blob SHA-1은 manifest에 별도로 기록합니다.
 
-다운로드 또는 검증 성공 후 `.sha256`은 표준 `sha256sum` 형식으로 저장됩니다.
+다운로드 또는 검증 성공 후 두 파일은 표준 coreutils 형식으로 저장됩니다.
 
 ```bash
 cd ./FluidInference_silero-vad-coreml
 sha256sum -c .sha256
+sha1sum -c .sha1sum
 ```
 
 `.metadata/repository.json`은 최신 Hub API 응답, 리포 종류, 요청 리비전,

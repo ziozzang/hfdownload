@@ -34,6 +34,7 @@ type Options struct {
 
 type Hashes struct {
 	SHA256  string
+	SHA1    string
 	GitSHA1 string
 }
 
@@ -428,8 +429,9 @@ func HashFile(path string, expectedSize int64, bufferSize int, bar *progress.Bar
 	return HashFileSelective(path, expectedSize, bufferSize, bar, true)
 }
 
-// HashFileSelective always computes SHA-256. Git SHA-1 can be disabled for LFS
-// objects, whose authoritative remote hash is already SHA-256.
+// HashFileSelective always computes raw-content SHA-256 and SHA-1. Git blob
+// SHA-1 can be disabled for LFS objects, whose authoritative remote hash is
+// already SHA-256.
 func HashFileSelective(path string, expectedSize int64, bufferSize int, bar *progress.Bar, computeGitSHA1 bool) (Hashes, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -444,9 +446,10 @@ func HashFileSelective(path string, expectedSize int64, bufferSize int, bar *pro
 		return Hashes{}, fmt.Errorf("size mismatch: got %d, want %d", st.Size(), expectedSize)
 	}
 	sha256Hash := sha256.New()
+	sha1Hash := sha1.New()
 	var gitHash hash.Hash
 	var writers []io.Writer
-	writers = append(writers, sha256Hash)
+	writers = append(writers, sha256Hash, sha1Hash)
 	if computeGitSHA1 {
 		gitHash = sha1.New()
 		_, _ = io.WriteString(gitHash, "blob "+strconv.FormatInt(expectedSize, 10)+"\x00")
@@ -463,7 +466,10 @@ func HashFileSelective(path string, expectedSize int64, bufferSize int, bar *pro
 	if _, err := io.CopyBuffer(writer, f, buf); err != nil {
 		return Hashes{}, err
 	}
-	hashes := Hashes{SHA256: hex.EncodeToString(sha256Hash.Sum(nil))}
+	hashes := Hashes{
+		SHA256: hex.EncodeToString(sha256Hash.Sum(nil)),
+		SHA1:   hex.EncodeToString(sha1Hash.Sum(nil)),
+	}
 	if gitHash != nil {
 		hashes.GitSHA1 = hex.EncodeToString(gitHash.Sum(nil))
 	}
@@ -491,7 +497,7 @@ func SafeTarget(root, remotePath string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != remotePath {
 		return "", fmt.Errorf("unsafe repository path %q", remotePath)
 	}
-	if clean == "tmp" || strings.HasPrefix(clean, "tmp"+string(filepath.Separator)) || clean == ".metadata" || strings.HasPrefix(clean, ".metadata"+string(filepath.Separator)) || clean == ".hfdown" || strings.HasPrefix(clean, ".hfdown"+string(filepath.Separator)) || clean == "hfdown-metadata" || strings.HasPrefix(clean, "hfdown-metadata"+string(filepath.Separator)) || clean == ".sha256" {
+	if clean == "tmp" || strings.HasPrefix(clean, "tmp"+string(filepath.Separator)) || clean == ".metadata" || strings.HasPrefix(clean, ".metadata"+string(filepath.Separator)) || clean == ".hfdown" || strings.HasPrefix(clean, ".hfdown"+string(filepath.Separator)) || clean == "hfdown-metadata" || strings.HasPrefix(clean, "hfdown-metadata"+string(filepath.Separator)) || clean == ".sha256" || clean == ".sha1sum" {
 		return "", fmt.Errorf("repository path %q conflicts with hfdown metadata", remotePath)
 	}
 	rootAbs, err := filepath.Abs(root)
