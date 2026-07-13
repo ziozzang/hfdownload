@@ -18,6 +18,29 @@ type Client struct {
 	HTTP     *http.Client
 }
 
+type RepoType string
+
+const (
+	RepoTypeModel   RepoType = "model"
+	RepoTypeDataset RepoType = "dataset"
+)
+
+func (t RepoType) normalized() RepoType {
+	if t == "" {
+		return RepoTypeModel
+	}
+	return t
+}
+
+func (t RepoType) Validate() error {
+	switch t.normalized() {
+	case RepoTypeModel, RepoTypeDataset:
+		return nil
+	default:
+		return fmt.Errorf("unsupported repository type %q", t)
+	}
+}
+
 type RepoInfo struct {
 	ID           string          `json:"id"`
 	SHA          string          `json:"sha"`
@@ -60,8 +83,15 @@ func New(endpoint, token string, timeout time.Duration) *Client {
 	}
 }
 
-func (c *Client) RepoInfo(ctx context.Context, repoID, revision string) (*RepoInfo, error) {
-	u := c.Endpoint + "/api/models/" + escapeRepo(repoID) + "/revision/" + url.PathEscape(revision) + "?blobs=true"
+func (c *Client) RepoInfo(ctx context.Context, repoType RepoType, repoID, revision string) (*RepoInfo, error) {
+	if err := repoType.Validate(); err != nil {
+		return nil, err
+	}
+	collection := "models"
+	if repoType.normalized() == RepoTypeDataset {
+		collection = "datasets"
+	}
+	u := c.Endpoint + "/api/" + collection + "/" + escapeRepo(repoID) + "/revision/" + url.PathEscape(revision) + "?blobs=true"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -103,12 +133,16 @@ func (c *Client) RepoInfo(ctx context.Context, repoID, revision string) (*RepoIn
 	return &info, nil
 }
 
-func (c *Client) DownloadURL(repoID, commitSHA, filePath string) string {
+func (c *Client) DownloadURL(repoType RepoType, repoID, commitSHA, filePath string) string {
 	segments := strings.Split(filePath, "/")
 	for i := range segments {
 		segments[i] = url.PathEscape(segments[i])
 	}
-	return c.Endpoint + "/" + escapeRepo(repoID) + "/resolve/" + url.PathEscape(commitSHA) + "/" + strings.Join(segments, "/") + "?download=true"
+	prefix := ""
+	if repoType.normalized() == RepoTypeDataset {
+		prefix = "/datasets"
+	}
+	return c.Endpoint + prefix + "/" + escapeRepo(repoID) + "/resolve/" + url.PathEscape(commitSHA) + "/" + strings.Join(segments, "/") + "?download=true"
 }
 
 func (c *Client) NewDownloadRequest(ctx context.Context, rawURL string, start, end int64) (*http.Request, error) {
@@ -178,6 +212,9 @@ func NormalizeRepoID(input string) (string, error) {
 			return "", fmt.Errorf("invalid Hugging Face repository URL %q", input)
 		}
 		input = strings.Trim(u.Path, "/")
+		if strings.HasPrefix(input, "datasets/") {
+			input = strings.TrimPrefix(input, "datasets/")
+		}
 	}
 	if err := ValidateRepoID(input); err != nil {
 		return "", err

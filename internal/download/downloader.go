@@ -42,6 +42,7 @@ type Downloader struct {
 	Root           string
 	StateDir       string
 	TempDir        string
+	RepoType       hub.RepoType
 	Options        Options
 	Progress       *progress.Bar
 	OnNetworkBytes func(int64)
@@ -89,7 +90,11 @@ func (d *Downloader) Download(ctx context.Context, repoID, commitSHA string, rem
 	if remote.Size < d.Options.MultipartThreshold || remote.Size < int64(parts) {
 		parts = 1
 	}
-	want := newPartialState(repoID, commitSHA, remote, parts)
+	repoType := d.RepoType
+	if repoType == "" {
+		repoType = hub.RepoTypeModel
+	}
+	want := newPartialState(repoType, repoID, commitSHA, remote, parts)
 	ps, resumed := loadCompatiblePartial(statePath, dataPath, want, d.Options.Resume)
 	if !resumed {
 		_ = os.Remove(dataPath)
@@ -260,7 +265,7 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 			case <-time.After(delay):
 			}
 		}
-		req, err := d.Client.NewDownloadRequest(ctx, d.Client.DownloadURL(repoID, commitSHA, remotePath), start, end)
+		req, err := d.Client.NewDownloadRequest(ctx, d.Client.DownloadURL(d.RepoType, repoID, commitSHA, remotePath), start, end)
 		if err != nil {
 			return err
 		}
@@ -329,8 +334,8 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 	return fmt.Errorf("download %q segment %d failed after %d attempt(s): %w", remotePath, index+1, retries+1, lastErr)
 }
 
-func newPartialState(repoID, commitSHA string, remote hub.RepoFile, parts int) *state.PartialState {
-	ps := &state.PartialState{Version: 1, RepoID: repoID, CommitSHA: commitSHA, Path: remote.Path, Size: remote.Size, RemoteBlobSHA1: remote.BlobID}
+func newPartialState(repoType hub.RepoType, repoID, commitSHA string, remote hub.RepoFile, parts int) *state.PartialState {
+	ps := &state.PartialState{Version: 1, RepoType: string(repoType), RepoID: repoID, CommitSHA: commitSHA, Path: remote.Path, Size: remote.Size, RemoteBlobSHA1: remote.BlobID}
 	if remote.LFS != nil {
 		ps.RemoteLFSSHA256 = remote.LFS.SHA256
 	}
@@ -378,7 +383,11 @@ func loadCompatiblePartial(statePath, dataPath string, want *state.PartialState,
 	if err != nil || st.Size() != want.Size {
 		return nil, false
 	}
-	if got.Version != want.Version || got.RepoID != want.RepoID || got.CommitSHA != want.CommitSHA || got.Path != want.Path || got.Size != want.Size || got.RemoteBlobSHA1 != want.RemoteBlobSHA1 || got.RemoteLFSSHA256 != want.RemoteLFSSHA256 || len(got.Segments) != len(want.Segments) {
+	gotRepoType := got.RepoType
+	if gotRepoType == "" {
+		gotRepoType = string(hub.RepoTypeModel)
+	}
+	if got.Version != want.Version || gotRepoType != want.RepoType || got.RepoID != want.RepoID || got.CommitSHA != want.CommitSHA || got.Path != want.Path || got.Size != want.Size || got.RemoteBlobSHA1 != want.RemoteBlobSHA1 || got.RemoteLFSSHA256 != want.RemoteLFSSHA256 || len(got.Segments) != len(want.Segments) {
 		return nil, false
 	}
 	for i, s := range got.Segments {

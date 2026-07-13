@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -24,20 +25,22 @@ import (
 	"github.com/ziozzang/hfdownload/internal/state"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 type settings struct {
-	Endpoint           string `json:"endpoint"`
-	Revision           string `json:"revision"`
-	Output             string `json:"output"`
-	Parts              int    `json:"parts"`
-	MultipartThreshold int64  `json:"multipart_threshold"`
-	BufferSize         int    `json:"buffer_size"`
-	Retries            int    `json:"retries"`
-	TimeoutSeconds     int    `json:"timeout_seconds"`
-	Resume             bool   `json:"resume"`
-	TokenEnv           string `json:"token_env"`
-	Token              string `json:"-"`
+	Endpoint           string   `json:"endpoint"`
+	Revision           string   `json:"revision"`
+	Output             string   `json:"output"`
+	Parts              int      `json:"parts"`
+	MultipartThreshold int64    `json:"multipart_threshold"`
+	BufferSize         int      `json:"buffer_size"`
+	Retries            int      `json:"retries"`
+	TimeoutSeconds     int      `json:"timeout_seconds"`
+	Resume             bool     `json:"resume"`
+	TokenEnv           string   `json:"token_env"`
+	Token              string   `json:"-"`
+	Tag                string   `json:"-"`
+	Filters            []string `json:"filters,omitempty"`
 }
 
 type queueFile struct {
@@ -46,14 +49,16 @@ type queueFile struct {
 }
 
 type queueJob struct {
-	Repo               string `json:"repo"`
-	Output             string `json:"output,omitempty"`
-	Revision           string `json:"revision,omitempty"`
-	Parts              *int   `json:"parts,omitempty"`
-	MultipartThreshold *int64 `json:"multipart_threshold,omitempty"`
-	BufferSize         *int   `json:"buffer_size,omitempty"`
-	Retries            *int   `json:"retries,omitempty"`
-	Resume             *bool  `json:"resume,omitempty"`
+	Repo               string   `json:"repo"`
+	Output             string   `json:"output,omitempty"`
+	Revision           string   `json:"revision,omitempty"`
+	Parts              *int     `json:"parts,omitempty"`
+	MultipartThreshold *int64   `json:"multipart_threshold,omitempty"`
+	BufferSize         *int     `json:"buffer_size,omitempty"`
+	Retries            *int     `json:"retries,omitempty"`
+	Resume             *bool    `json:"resume,omitempty"`
+	RepoType           string   `json:"type,omitempty"`
+	Filters            []string `json:"filters,omitempty"`
 }
 
 func defaults() settings {
@@ -80,8 +85,10 @@ func run(ctx context.Context, args []string) error {
 		return flag.ErrHelp
 	}
 	switch args[0] {
-	case "download":
+	case "download", "dn", "d":
 		return downloadCommand(ctx, args[1:])
+	case "dataset", "ds":
+		return datasetCommand(ctx, args[1:])
 	case "batch":
 		return batchCommand(ctx, args[1:])
 	case "verify":
@@ -103,29 +110,38 @@ func run(ctx context.Context, args []string) error {
 }
 
 func downloadCommand(ctx context.Context, args []string) error {
+	return repositoryCommand(ctx, args, hub.RepoTypeModel, "download")
+}
+
+func datasetCommand(ctx context.Context, args []string) error {
+	return repositoryCommand(ctx, args, hub.RepoTypeDataset, "dataset")
+}
+
+func repositoryCommand(ctx context.Context, args []string, repoType hub.RepoType, commandName string) error {
 	cfg, configPath, err := loadSettings(args)
 	if err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("download", flag.ContinueOnError)
+	fs := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var repo string
-	fs.StringVar(&repo, "repo", "", "Hugging Face model repository ID or URL")
+	fs.StringVar(&repo, "repo", "", "Hugging Face repository ID or URL")
 	fs.StringVar(&cfg.Output, "output", cfg.Output, "destination directory (default: <owner>_<repo>)")
 	addTransferFlags(fs, &cfg, &configPath)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	applyTag(&cfg)
 	if repo == "" {
 		if fs.NArg() == 1 {
 			repo = fs.Arg(0)
 		} else {
-			return fmt.Errorf("usage: hfdown download [options] REPO")
+			return fmt.Errorf("usage: hfdown %s [options] REPO", commandName)
 		}
 	} else if fs.NArg() != 0 {
 		return fmt.Errorf("repository supplied both with --repo and as an argument")
 	}
-	return syncRepo(ctx, cfg, repo)
+	return syncRepository(ctx, cfg, repo, repoType)
 }
 
 func batchCommand(ctx context.Context, args []string) error {
@@ -135,14 +151,19 @@ func batchCommand(ctx context.Context, args []string) error {
 	}
 	fs := flag.NewFlagSet("batch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	var queuePath, listPath, outputRoot string
+	var queuePath, listPath, outputRoot, defaultRepoType string
 	var continueOnError bool
 	addTransferFlags(fs, &cfg, &configPath)
-	fs.StringVar(&queuePath, "queue", "", "JSON queue or line-based model list")
-	fs.StringVar(&listPath, "list", "", "line-based model list (';' comments and blank lines allowed)")
-	fs.StringVar(&outputRoot, "output-root", "", "root for automatically named model directories")
+	fs.StringVar(&queuePath, "queue", "", "JSON queue or line-based repository list")
+	fs.StringVar(&listPath, "list", "", "line-based repository list (';' comments and blank lines allowed)")
+	fs.StringVar(&outputRoot, "output-root", "", "root for automatically named repository directories")
+	fs.StringVar(&defaultRepoType, "type", "model", "repository type for list entries: model or dataset")
 	fs.BoolVar(&continueOnError, "continue-on-error", false, "continue with remaining jobs after a failure")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	applyTag(&cfg)
+	if err := hub.RepoType(defaultRepoType).Validate(); err != nil {
 		return err
 	}
 	if queuePath != "" && listPath != "" {
@@ -174,7 +195,7 @@ func batchCommand(ctx context.Context, args []string) error {
 	if len(q.Jobs) == 0 {
 		return fmt.Errorf("queue contains no jobs")
 	}
-	fmt.Fprintf(os.Stderr, "batch plan: %d models\n", len(q.Jobs))
+	fmt.Fprintf(os.Stderr, "batch plan: %d repositories\n", len(q.Jobs))
 	var failed []string
 	for i, job := range q.Jobs {
 		if job.Repo == "" {
@@ -185,6 +206,13 @@ func batchCommand(ctx context.Context, args []string) error {
 			return fmt.Errorf("queue job %d: %w", i+1, err)
 		}
 		jobCfg := cfg
+		jobRepoType := hub.RepoType(defaultRepoType)
+		if job.RepoType != "" {
+			jobRepoType = hub.RepoType(job.RepoType)
+			if err := jobRepoType.Validate(); err != nil {
+				return fmt.Errorf("queue job %d: %w", i+1, err)
+			}
+		}
 		if job.Revision != "" {
 			jobCfg.Revision = job.Revision
 		}
@@ -203,6 +231,9 @@ func batchCommand(ctx context.Context, args []string) error {
 		if job.Resume != nil {
 			jobCfg.Resume = *job.Resume
 		}
+		if job.Filters != nil {
+			jobCfg.Filters = append([]string(nil), job.Filters...)
+		}
 		if job.Output != "" {
 			jobCfg.Output = job.Output
 		} else {
@@ -212,8 +243,8 @@ func batchCommand(ctx context.Context, args []string) error {
 			}
 			jobCfg.Output = filepath.Join(outputRoot, hub.LocalDirectoryName(normalizedRepo))
 		}
-		fmt.Fprintf(os.Stderr, "\n[%d/%d] %s -> %s\n", i+1, len(q.Jobs), normalizedRepo, jobCfg.Output)
-		if err := syncRepo(ctx, jobCfg, normalizedRepo); err != nil {
+		fmt.Fprintf(os.Stderr, "\n[%d/%d] %s %s -> %s\n", i+1, len(q.Jobs), jobRepoType, normalizedRepo, jobCfg.Output)
+		if err := syncRepository(ctx, jobCfg, normalizedRepo, jobRepoType); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", job.Repo, err))
 			if !continueOnError {
 				return errors.New(failed[0])
@@ -223,12 +254,14 @@ func batchCommand(ctx context.Context, args []string) error {
 	if len(failed) > 0 {
 		return fmt.Errorf("%d queue job(s) failed:\n  %s", len(failed), strings.Join(failed, "\n  "))
 	}
-	fmt.Fprintf(os.Stderr, "batch complete: %d/%d models\n", len(q.Jobs), len(q.Jobs))
+	fmt.Fprintf(os.Stderr, "batch complete: %d/%d repositories\n", len(q.Jobs), len(q.Jobs))
 	return nil
 }
 
 func addTransferFlags(fs *flag.FlagSet, cfg *settings, configPath *string) {
 	fs.StringVar(&cfg.Revision, "revision", cfg.Revision, "branch, tag, or commit")
+	fs.StringVar(&cfg.Tag, "tag", "", "tag name (overrides --revision)")
+	fs.Var(stringSliceValue{&cfg.Filters}, "filter", "include glob; repeat for multiple patterns")
 	fs.IntVar(&cfg.Parts, "parts", cfg.Parts, "parallel ranges per large file (1 disables multipart)")
 	fs.Var(byteSizeValue{&cfg.MultipartThreshold}, "multipart-threshold", "minimum size to split (for example 64MiB)")
 	fs.Var(byteSizeIntValue{&cfg.BufferSize}, "buffer-size", "memory buffer per part (for example 1MiB)")
@@ -262,17 +295,24 @@ func parseQueueData(data []byte) (queueFile, error) {
 		}
 		repoID, err := hub.NormalizeRepoID(line)
 		if err != nil {
-			return queueFile{}, fmt.Errorf("model list line %d: %w", lineNumber, err)
+			return queueFile{}, fmt.Errorf("repository list line %d: %w", lineNumber, err)
 		}
 		q.Jobs = append(q.Jobs, queueJob{Repo: repoID})
 	}
 	if err := scanner.Err(); err != nil {
-		return queueFile{}, fmt.Errorf("model list read: %w", err)
+		return queueFile{}, fmt.Errorf("repository list read: %w", err)
 	}
 	return q, nil
 }
 
 func syncRepo(ctx context.Context, cfg settings, repoID string) error {
+	return syncRepository(ctx, cfg, repoID, hub.RepoTypeModel)
+}
+
+func syncRepository(ctx context.Context, cfg settings, repoID string, repoType hub.RepoType) error {
+	if err := repoType.Validate(); err != nil {
+		return err
+	}
 	if err := validateSettings(cfg); err != nil {
 		return err
 	}
@@ -305,8 +345,14 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 	if err != nil {
 		return err
 	}
-	if m != nil && m.RepoID != repoID {
-		return fmt.Errorf("output already belongs to %s; choose another directory", m.RepoID)
+	if m != nil {
+		existingType := hub.RepoType(m.RepoType)
+		if existingType == "" {
+			existingType = hub.RepoTypeModel
+		}
+		if m.RepoID != repoID || existingType != repoType {
+			return fmt.Errorf("output already belongs to %s %s; choose another directory", existingType, m.RepoID)
+		}
 	}
 	token := cfg.Token
 	if token == "" {
@@ -314,13 +360,13 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 	}
 	client := hub.New(cfg.Endpoint, token, time.Duration(cfg.TimeoutSeconds)*time.Second)
 	fmt.Fprintf(os.Stderr, "resolving %s@%s...\n", repoID, cfg.Revision)
-	info, err := client.RepoInfo(ctx, repoID, cfg.Revision)
+	info, err := client.RepoInfo(ctx, repoType, repoID, cfg.Revision)
 	if err != nil {
 		return err
 	}
 	metadataFetchedAt := time.Now().UTC()
 	repositoryMetadata := state.RepositoryMetadata{
-		Version: 1, FetchedAt: metadataFetchedAt, Endpoint: cfg.Endpoint, RepoID: repoID,
+		Version: 1, RepoType: string(repoType), FetchedAt: metadataFetchedAt, Endpoint: cfg.Endpoint, RepoID: repoID,
 		RequestedRevision: cfg.Revision, ResolvedCommitSHA: info.SHA,
 		LastModified: info.LastModified, CreatedAt: info.CreatedAt, Payload: info.RawMetadata,
 	}
@@ -328,7 +374,7 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 		return err
 	}
 	metadataEvent := state.RepositoryMetadataEvent{
-		FetchedAt: metadataFetchedAt, Endpoint: cfg.Endpoint, RepoID: repoID,
+		FetchedAt: metadataFetchedAt, RepoType: string(repoType), Endpoint: cfg.Endpoint, RepoID: repoID,
 		RequestedRevision: cfg.Revision, ResolvedCommitSHA: info.SHA,
 		LastModified: info.LastModified, CreatedAt: info.CreatedAt,
 	}
@@ -338,10 +384,15 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 	if m == nil {
 		m = state.NewManifest(repoID, cfg.Revision, info.SHA)
 	}
+	m.RepoType = string(repoType)
+	m.Filters = append([]string(nil), cfg.Filters...)
 	m.Revision, m.CommitSHA = cfg.Revision, info.SHA
 	m.HubLastModified, m.RepositoryCreatedAt, m.MetadataFetchedAt = info.LastModified, info.CreatedAt, &metadataFetchedAt
 
-	files := append([]hub.RepoFile(nil), info.Siblings...)
+	files, err := filterRepoFiles(info.Siblings, cfg.Filters)
+	if err != nil {
+		return err
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	seen := make(map[string]bool, len(files))
 	targets := make(map[string]string, len(files))
@@ -374,7 +425,7 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 	overall.SetDone(cachedBytes)
 	defer overall.Finish()
 	var networkBytes, resumedBytes atomic.Int64
-	d := download.Downloader{Client: client, Root: root, StateDir: stateDir, TempDir: filepath.Join(root, "tmp"), Options: download.Options{
+	d := download.Downloader{Client: client, Root: root, StateDir: stateDir, TempDir: filepath.Join(root, "tmp"), RepoType: repoType, Options: download.Options{
 		Parts: cfg.Parts, MultipartThreshold: cfg.MultipartThreshold, BufferSize: cfg.BufferSize,
 		Retries: cfg.Retries, Resume: cfg.Resume,
 	}, Progress: overall,
@@ -433,9 +484,11 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 			return err
 		}
 	}
-	for path := range m.Files {
-		if !seen[path] {
-			delete(m.Files, path)
+	if len(cfg.Filters) == 0 {
+		for path := range m.Files {
+			if !seen[path] {
+				delete(m.Files, path)
+			}
 		}
 	}
 	m.UpdatedAt = time.Now().UTC()
@@ -455,7 +508,7 @@ func syncRepo(ctx context.Context, cfg settings, repoID string) error {
 
 func verifyCommand(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
-	output := fs.String("output", ".", "model directory")
+	output := fs.String("output", ".", "downloaded repository directory")
 	force := fs.Bool("force", false, "rehash every file even when metadata is unchanged")
 	buffer := int64(1 << 20)
 	fs.Var(byteSizeValue{&buffer}, "buffer-size", "hashing buffer size")
@@ -467,9 +520,9 @@ func verifyCommand(args []string) error {
 
 func verifyBatchCommand(args []string) error {
 	fs := flag.NewFlagSet("verify-batch", flag.ContinueOnError)
-	rootFlag := fs.String("root", ".", "root directory containing downloaded models")
+	rootFlag := fs.String("root", ".", "root directory containing downloaded repositories")
 	force := fs.Bool("force", false, "rehash every file even when metadata is unchanged")
-	failFast := fs.Bool("fail-fast", false, "stop after the first model verification failure")
+	failFast := fs.Bool("fail-fast", false, "stop after the first repository verification failure")
 	buffer := int64(1 << 20)
 	fs.Var(byteSizeValue{&buffer}, "buffer-size", "hashing buffer size")
 	if err := fs.Parse(args); err != nil {
@@ -483,7 +536,7 @@ func verifyBatchCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	var models []string
+	var repositories []string
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -493,30 +546,30 @@ func verifyBatchCommand(args []string) error {
 		}
 		manifestPath := filepath.Join(path, "manifest.json")
 		if st, statErr := os.Stat(manifestPath); statErr == nil && st.Mode().IsRegular() {
-			models = append(models, filepath.Dir(path))
+			repositories = append(repositories, filepath.Dir(path))
 		}
 		return filepath.SkipDir
 	})
 	if err != nil {
 		return err
 	}
-	if len(models) == 0 {
-		return fmt.Errorf("no hfdown model directories found under %s", root)
+	if len(repositories) == 0 {
+		return fmt.Errorf("no hfdown repository directories found under %s", root)
 	}
-	sort.Strings(models)
+	sort.Strings(repositories)
 	var failures []string
-	for i, modelDir := range models {
-		fmt.Fprintf(os.Stderr, "\n[%d/%d] verifying %s\n", i+1, len(models), modelDir)
-		if err := verifyDirectory(modelDir, *force, int(buffer)); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", modelDir, err))
+	for i, repositoryDir := range repositories {
+		fmt.Fprintf(os.Stderr, "\n[%d/%d] verifying %s\n", i+1, len(repositories), repositoryDir)
+		if err := verifyDirectory(repositoryDir, *force, int(buffer)); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", repositoryDir, err))
 			if *failFast {
 				break
 			}
 		}
 	}
-	fmt.Printf("batch verify: models=%d passed=%d failed=%d\n", len(models), len(models)-len(failures), len(failures))
+	fmt.Printf("batch verify: repositories=%d passed=%d failed=%d\n", len(repositories), len(repositories)-len(failures), len(failures))
 	if len(failures) > 0 {
-		return fmt.Errorf("%d model verification(s) failed:\n  %s", len(failures), strings.Join(failures, "\n  "))
+		return fmt.Errorf("%d repository verification(s) failed:\n  %s", len(failures), strings.Join(failures, "\n  "))
 	}
 	return nil
 }
@@ -542,7 +595,7 @@ func verifyDirectory(output string, force bool, buffer int) error {
 	if m == nil {
 		return fmt.Errorf("no manifest found at %s", manifestPath)
 	}
-	history := state.VerifyHistory{StartedAt: time.Now().UTC(), RepoID: m.RepoID, Revision: m.Revision, CommitSHA: m.CommitSHA, Forced: force}
+	history := state.VerifyHistory{StartedAt: time.Now().UTC(), RepoType: m.RepoType, RepoID: m.RepoID, Revision: m.Revision, CommitSHA: m.CommitSHA, Forced: force}
 	now := time.Now().UTC()
 	for _, rec := range state.SortedFiles(m) {
 		target, pathErr := download.SafeTarget(root, rec.Path)
@@ -607,7 +660,7 @@ func verifyDirectory(output string, force bool, buffer int) error {
 
 func statusCommand(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	output := fs.String("output", ".", "model directory")
+	output := fs.String("output", ".", "downloaded repository directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -634,7 +687,11 @@ func statusCommand(args []string) error {
 	for _, f := range m.Files {
 		bytes += f.Size
 	}
-	fmt.Printf("repo: %s\nrevision: %s\ncommit: %s\nfiles: %d\nsize: %s\nupdated: %s\n", m.RepoID, m.Revision, m.CommitSHA, len(m.Files), humanBytes(bytes), m.UpdatedAt.Format(time.RFC3339))
+	repoType := m.RepoType
+	if repoType == "" {
+		repoType = string(hub.RepoTypeModel)
+	}
+	fmt.Printf("type: %s\nrepo: %s\nrevision: %s\ncommit: %s\nfiles: %d\nsize: %s\nupdated: %s\n", repoType, m.RepoID, m.Revision, m.CommitSHA, len(m.Files), humanBytes(bytes), m.UpdatedAt.Format(time.RFC3339))
 	if m.HubLastModified != "" {
 		fmt.Printf("hub last modified: %s\n", m.HubLastModified)
 	}
@@ -839,6 +896,77 @@ func validateSettings(cfg settings) error {
 	if cfg.Endpoint == "" || cfg.Revision == "" || cfg.TokenEnv == "" {
 		return fmt.Errorf("endpoint, revision, and token-env cannot be empty")
 	}
+	if _, err := normalizeFilters(cfg.Filters); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyTag(cfg *settings) {
+	if cfg.Tag != "" {
+		cfg.Revision = cfg.Tag
+	}
+}
+
+func normalizeFilters(expressions []string) ([]string, error) {
+	var filters []string
+	for _, expression := range expressions {
+		for _, pattern := range strings.Split(expression, "|") {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			pattern = strings.ToLower(pattern)
+			if _, err := path.Match(pattern, "validation"); err != nil {
+				return nil, fmt.Errorf("invalid filter %q: %w", pattern, err)
+			}
+			filters = append(filters, pattern)
+		}
+	}
+	return filters, nil
+}
+
+func filterRepoFiles(files []hub.RepoFile, expressions []string) ([]hub.RepoFile, error) {
+	filters, err := normalizeFilters(expressions)
+	if err != nil {
+		return nil, err
+	}
+	if len(filters) == 0 {
+		return append([]hub.RepoFile(nil), files...), nil
+	}
+	selected := make([]hub.RepoFile, 0)
+	for _, file := range files {
+		fullPath := strings.ToLower(file.Path)
+		baseName := path.Base(fullPath)
+		for _, pattern := range filters {
+			target := fullPath
+			if !strings.Contains(pattern, "/") {
+				target = baseName
+			}
+			matched, _ := path.Match(pattern, target)
+			if matched {
+				selected = append(selected, file)
+				break
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no repository files matched filter(s): %s", strings.Join(filters, " | "))
+	}
+	return selected, nil
+}
+
+type stringSliceValue struct{ target *[]string }
+
+func (v stringSliceValue) String() string {
+	if v.target == nil {
+		return ""
+	}
+	return strings.Join(*v.target, "|")
+}
+
+func (v stringSliceValue) Set(value string) error {
+	*v.target = append(*v.target, value)
 	return nil
 }
 
@@ -919,10 +1047,11 @@ func humanBytes(n int64) string {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, `hfdown - resumable, hash-verified Hugging Face model downloader
+	fmt.Fprintln(w, `hfdown - resumable, hash-verified Hugging Face repository downloader
 
 Usage:
-  hfdown download [options] REPO
+  hfdown download|dn|d [options] REPO
+  hfdown dataset|ds [options] REPO
   hfdown batch --list models.txt [options]
   hfdown batch --queue queue.json [options]
   hfdown verify [--output DIR] [--force]

@@ -16,7 +16,9 @@ const ManifestVersion = 1
 
 type Manifest struct {
 	Version             int                    `json:"version"`
+	RepoType            string                 `json:"repo_type,omitempty"`
 	RepoID              string                 `json:"repo_id"`
+	Filters             []string               `json:"filters,omitempty"`
 	Revision            string                 `json:"revision"`
 	CommitSHA           string                 `json:"commit_sha"`
 	HubLastModified     string                 `json:"hub_last_modified,omitempty"`
@@ -29,6 +31,7 @@ type Manifest struct {
 
 type RepositoryMetadata struct {
 	Version           int             `json:"version"`
+	RepoType          string          `json:"repo_type"`
 	FetchedAt         time.Time       `json:"fetched_at"`
 	Endpoint          string          `json:"endpoint"`
 	RepoID            string          `json:"repo_id"`
@@ -41,6 +44,7 @@ type RepositoryMetadata struct {
 
 type RepositoryMetadataEvent struct {
 	FetchedAt         time.Time `json:"fetched_at"`
+	RepoType          string    `json:"repo_type"`
 	Endpoint          string    `json:"endpoint"`
 	RepoID            string    `json:"repo_id"`
 	RequestedRevision string    `json:"requested_revision"`
@@ -71,6 +75,7 @@ type Segment struct {
 
 type PartialState struct {
 	Version         int       `json:"version"`
+	RepoType        string    `json:"repo_type,omitempty"`
 	RepoID          string    `json:"repo_id"`
 	CommitSHA       string    `json:"commit_sha"`
 	Path            string    `json:"path"`
@@ -83,6 +88,7 @@ type PartialState struct {
 type VerifyHistory struct {
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"`
+	RepoType    string    `json:"repo_type,omitempty"`
 	RepoID      string    `json:"repo_id"`
 	Revision    string    `json:"revision"`
 	CommitSHA   string    `json:"commit_sha"`
@@ -168,7 +174,11 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 
 func WriteChecksumFile(path string, m *Manifest) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# hfdown repo: %s\n# revision: %s\n# commit: %s\n", m.RepoID, m.Revision, m.CommitSHA)
+	repoType := m.RepoType
+	if repoType == "" {
+		repoType = "model"
+	}
+	fmt.Fprintf(&b, "# hfdown type: %s\n# repo: %s\n# revision: %s\n# commit: %s\n", repoType, m.RepoID, m.Revision, m.CommitSHA)
 	for _, f := range SortedFiles(m) {
 		name := f.Path
 		prefix := ""

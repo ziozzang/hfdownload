@@ -3,11 +3,13 @@
   "jobs": [
     {
       "repo": "hf-internal-testing/tiny-random-bert",
-      "revision": "main"
+      "revision": "main",
+      "filters": ["*.json|*.txt"]
     },
     {
-      "repo": "openai-community/gpt2",
-      "output": "./models/gpt2",
+      "repo": "lhoestq/demo1",
+      "type": "dataset",
+      "output": "./models/lhoestq_demo1",
       "revision": "main",
       "parts": 8,
       "multipart_threshold": 67108864,

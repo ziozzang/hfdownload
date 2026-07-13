@@ -1,292 +1,314 @@
 # hfdown
 
-`hfdown` is a low-resource, resumable downloader for complete Hugging Face model
-repositories. It resolves a revision to a Git commit, downloads every file with
-HTTP Range requests, and verifies the result against Git blob or Git LFS hashes.
+English | [한국어](README_KO.md)
+
+`hfdown` is a low-resource, resumable downloader for Hugging Face model and
+dataset repositories. It resolves a revision to a Git commit, downloads files
+with HTTP Range requests, and verifies them against Git blob or Git LFS hashes.
 
 ## Features
 
-- Full model-repository downloads pinned to a resolved commit SHA
+- Model and dataset repositories, pinned to a resolved commit SHA
+- Full-repository or case-insensitive glob-filtered downloads
 - Multipart HTTP Range downloads with resume enabled by default
-- Adoption of an existing short file as a resumable prefix
-- Constant-size I/O buffers and no model-sized in-memory buffering
-- Per-file Git blob SHA-1 or Git LFS SHA-256 verification
-- A local SHA-256 checksum file for every downloaded model file
-- Repository metadata snapshots and append-only verification history
-- Plain-text model lists and structured JSON queues
-- Recursive verification of every downloaded model under a directory
-- Incremental updates: only files whose remote object hash changed are fetched
-- Static cross-platform release binaries
+- Constant-size I/O buffers; files are never held entirely in memory
+- Git blob SHA-1 or Git LFS SHA-256 verification for every downloaded file
+- Raw local SHA-256 entries in `<repository>/.sha256`
+- Hub metadata snapshots and append-only update/verification history
+- Plain-text lists and per-job JSON queues
+- Recursive batch verification and forced full rehashing
+- Incremental updates that fetch only remotely changed files
+- Static binaries for macOS, Windows, and Linux on ARM64 and x86-64
 
-## Build
+## Install and build
 
-Go 1.24 or newer is required.
-
-Download a prebuilt static binary from
-[GitHub Releases](https://github.com/ziozzang/hfdownload/releases), or install
-from source:
+Download a prebuilt binary from
+[GitHub Releases](https://github.com/ziozzang/hfdownload/releases), or build
+with Go 1.24 or newer:
 
 ```bash
 go install github.com/ziozzang/hfdownload/cmd/hfdown@latest
-```
 
-```bash
 make build
 ./hfdown version
 ```
 
-Build all release targets:
+Build all six release targets:
 
 ```bash
 make release
 ```
 
-Release binaries are written to `dist/` for:
-
-- macOS ARM64 and x86_64
-- Windows ARM64 and x86_64
-- Linux ARM64 and x86_64
-
-All release builds use `CGO_ENABLED=0`, `netgo`, and `osusergo`. Linux outputs
-are additionally checked with `file` to ensure they are statically linked.
+Outputs are written to `dist/`. Release builds use `CGO_ENABLED=0`, `netgo`,
+and `osusergo`; the build script also checks that Linux outputs are statically
+linked.
 
 ## Authentication
 
-By default, `hfdown` reads the token with `os.Getenv("HF_TOKEN")`.
+The token is read with `os.Getenv("HF_TOKEN")` by default:
 
 ```bash
 export HF_TOKEN=hf_xxx
-hfdown download owner/model
+hfdown d owner/model
 ```
 
-To use a differently named environment variable:
+Choose another environment variable or supply a token directly:
 
 ```bash
-hfdown download --token-env MY_HF_TOKEN owner/model
+hfdown d --token-env MY_HF_TOKEN owner/model
+hfdown d --token hf_xxx owner/model
 ```
 
-A token can also be passed directly:
+The environment form is safer because command-line arguments can appear in
+shell history or process listings. Tokens are never stored in metadata,
+checksums, configuration, or logs.
 
-```bash
-hfdown download --token hf_xxx owner/model
-```
+## Download a model
 
-The environment-variable form is recommended because command-line arguments
-may be visible in shell history or process listings. Tokens are never written
-to `.metadata`, `.sha256`, configuration files, or logs.
-
-## Download one model
-
-Both repository IDs and full Hugging Face URLs are accepted. If `--output` is
-omitted, the local directory name is `<owner>_<repo>`.
+`download`, `dn`, and `d` are equivalent. A repository ID or full URL is
+accepted. The default local directory is `<owner>_<repo>`.
 
 ```bash
 hfdown download FluidInference/silero-vad-coreml
-# -> ./FluidInference_silero-vad-coreml/
-
-hfdown download https://huggingface.co/FluidInference/silero-vad-coreml
+hfdown dn FluidInference/silero-vad-coreml
+hfdown d https://huggingface.co/FluidInference/silero-vad-coreml
 # -> ./FluidInference_silero-vad-coreml/
 ```
 
 Custom destination and multipart settings:
 
 ```bash
-hfdown download \
+hfdown d \
   --output ./models/silero-vad \
   --parts 8 \
   --multipart-threshold 64MiB \
   FluidInference/silero-vad-coreml
 ```
 
-Important options:
+## Download a dataset
+
+`dataset` and `ds` are equivalent. Dataset IDs and full `/datasets/` URLs are
+accepted. The default directory naming rule is also `<owner>_<repo>`.
+
+```bash
+hfdown dataset lhoestq/demo1
+hfdown ds https://huggingface.co/datasets/lhoestq/demo1
+# -> ./lhoestq_demo1/
+```
+
+## Tags, revisions, and file filters
+
+`--revision` accepts a branch, tag, or commit SHA. `--tag` is a convenient
+alias that overrides `--revision`.
+
+```bash
+hfdown d --tag v1.2.0 owner/model
+hfdown ds --revision 0123456789abcdef owner/dataset
+```
+
+`--filter` selects files using shell-style globs. Matching is
+case-insensitive. Multiple filters are OR conditions and can be supplied by
+repeating the option, using `|`, or both:
+
+```bash
+hfdown d \
+  --filter '*.json|*.parquet|*_q4_?.gguf' \
+  owner/model
+
+hfdown d \
+  --filter '*.json' \
+  --filter '*.gguf' \
+  owner/model
+
+hfdown d \
+  --tag Q4-release \
+  --filter 'weights/*_q4_?.gguf|tokenizer*.json' \
+  owner/model
+```
+
+Quote filter expressions so the shell does not expand `*`, `?`, or `|`.
+Patterns containing `/` match the complete repository-relative path; other
+patterns match the basename in any directory. A zero-match filter is reported
+as an error instead of silently downloading nothing.
+
+A filtered update checks the repository's current commit but only downloads
+selected files whose remote object hashes changed. Previously managed,
+unselected files are retained in the manifest and `.sha256`.
+
+## Important download options
 
 - `--revision main`: branch, tag, or commit SHA
+- `--tag TAG`: tag name; overrides `--revision`
+- `--filter GLOB`: include filter; repeat it or separate patterns with `|`
 - `--parts 4`: parallel ranges per large file; `1` disables multipart
-- `--multipart-threshold 64MiB`: minimum file size for multipart mode
+- `--multipart-threshold 64MiB`: minimum size for multipart mode
 - `--resume=true`: resume compatible partial downloads
 - `--buffer-size 1MiB`: memory buffer used by each active range
 - `--retries 5`: retry count for each range
-- `--token-env HF_TOKEN`: environment variable holding the token
+- `--token-env HF_TOKEN`: environment variable containing the token
 - `--token TOKEN`: direct token value
 
 Default download-buffer memory is approximately `parts × buffer-size`. Files
-are processed one at a time and are never loaded into memory in full.
+are processed sequentially and are never loaded into memory in full.
 
-## Download a plain-text model list
+## Plain-text batch lists
 
-The simplest batch format contains one model per line. Blank lines and lines
-whose first non-space character is `;` are ignored.
+Put one repository ID per line. Blank lines and lines whose first non-space
+character is `;` are ignored.
 
 ```text
-; Voice models
+; Models to mirror
 
 FluidInference/silero-vad-coreml
-hf-internal-testing/tiny-random-bert
-
-; Full URLs are valid too
-https://huggingface.co/openai-community/gpt2
+openai-community/gpt2
 ```
 
-Run the list:
+Download a model list:
 
 ```bash
 hfdown batch --list models.txt
 hfdown batch --list models.txt --output-root ./models --continue-on-error
 ```
 
-Without `--output-root`, models are created under the current directory. The
-example above creates directories such as
-`FluidInference_silero-vad-coreml/`.
+Download a dataset list using the same format:
 
-See [`models.example.txt`](models.example.txt) for a complete example.
+```bash
+hfdown batch --type dataset --list datasets.txt --output-root ./datasets
+```
+
+Global `--tag` and `--filter` options also apply to batch list entries. See
+[`models.example.txt`](models.example.txt).
 
 ## Structured JSON queue
 
-Use a JSON queue when models need different revisions, output paths, part
-counts, or buffer settings.
+Use a JSON queue for mixed repository types or per-job settings:
+
+```json
+{
+  "output_root": "./repositories",
+  "jobs": [
+    {
+      "repo": "owner/model",
+      "revision": "v2",
+      "filters": ["*.json|*_q8_0.gguf"]
+    },
+    {
+      "repo": "owner/dataset",
+      "type": "dataset",
+      "filters": ["*.parquet"]
+    }
+  ]
+}
+```
 
 ```bash
 hfdown batch --queue queue.json
 hfdown batch --queue queue.json --continue-on-error
 ```
 
-See [`queue.example.json`](queue.example.json).
+See [`queue.example.json`](queue.example.json) for all common per-job options.
 
 ## Resume behavior
 
 Resume mode is enabled by default.
 
-- A compatible `tmp/<file-key>/state.json` resumes each Range at its saved
+- Compatible `tmp/<file-key>/state.json` state resumes every Range at its saved
   byte offset.
-- A file at the final output path that is shorter than the remote file is moved
-  to `tmp/` and adopted as an already downloaded prefix.
-- The final file is promoted only after its complete hash matches the remote
-  object hash.
-- If resumed bytes fail the final hash, they are removed and that file is
-  downloaded once from byte zero during the same run.
-- Files already validated in the manifest are not read again when their remote
-  object hash, size, and modification time are unchanged.
-- Files without a matching validation record are scanned once before deciding
-  whether a download is necessary.
-
-Multipart ranges write directly to their offsets in one `download.part` file.
-This avoids a separate part-concatenation pass and model-sized duplicate disk
-usage.
+- A short file at the final path is moved to `tmp/` and adopted as an existing
+  prefix.
+- Multipart ranges write directly to offsets in one `download.part`; no
+  model-sized concatenation copy is needed.
+- The final file is promoted only after its complete remote hash matches.
+- If resumed bytes fail the hash, that file is retried once from byte zero.
+- Unchanged files with valid manifest records are not re-read.
+- Files without a current validation record are scanned once before download.
 
 ## Progress display
 
-Before downloading, `hfdown` prints the complete plan:
+Before transfer, `hfdown` prints the complete selected-file plan:
 
 ```text
 plan: 42 files • 14.8 GiB total • 35 cached (9.2 GiB) • 7 remaining (5.6 GiB)
 ```
 
-The progress bar tracks completed bytes against total repository size and
-shows the active file, file count, percentage, bytes, and transfer speed. The
-completion summary reports:
+The progress bar shows active file, completed/total file count, percentage,
+bytes, and speed. The final summary reports cached files and bytes, existing
+files scanned successfully, downloaded files, network bytes, and resumed
+bytes.
 
-- Total and cached file counts
-- Cached bytes
-- Existing files verified by scanning
-- Files actually downloaded
-- Bytes received from the network
-- Partial bytes reused by resume
+## Verification and updates
 
-## Verification
-
-Verify one model. The default mode reuses unchanged validation records:
+Metadata-cached verification avoids rehashing unchanged files:
 
 ```bash
 hfdown verify --output ./FluidInference_silero-vad-coreml
 ```
 
-Force every file to be read and rehashed:
+Force a full read and rehash, or recursively verify every managed repository:
 
 ```bash
 hfdown verify --output ./FluidInference_silero-vad-coreml --force
-```
-
-Recursively verify all downloaded models under a directory:
-
-```bash
-hfdown verify-batch --root ./models
 hfdown verify-batch --root ./models --force
-```
-
-Batch verification continues after model failures by default. Use
-`--fail-fast` to stop at the first failed model.
-
-Inspect recorded status:
-
-```bash
 hfdown status --output ./FluidInference_silero-vad-coreml
 ```
 
-## Incremental model updates
+`verify-batch` continues after failures by default; add `--fail-fast` to stop
+at the first failure.
 
-Run the same download command or queue again to check for model updates:
+Run the same download or batch command later to check for an update. The
+requested revision is resolved again, and files are compared by Git blob or
+Git LFS object hash. Only changed files are downloaded. A literal commit SHA
+keeps the download pinned.
 
-```bash
-hfdown batch --list models.txt --output-root ./models --continue-on-error
-```
-
-The requested revision is resolved again. Files are compared by Git blob or
-Git LFS object hash, so an updated commit only downloads changed files. Files
-with unchanged object hashes are reused across commits. A revision set to a
-specific commit SHA remains pinned to that commit.
-
-## Files created in each model directory
+## Repository layout
 
 ```text
-<model-directory>/
-├── <model files>
+<repository-directory>/
+├── <downloaded files>
 ├── .sha256
 ├── .metadata/
 │   ├── manifest.json
 │   ├── repository.json
 │   ├── repository-history.jsonl
 │   └── verification-history.jsonl
-└── tmp/                         # exists only while a download is incomplete
+└── tmp/                         # only while a download is incomplete
     └── <file-key>/
         ├── download.part
         └── state.json
 ```
 
-The `tmp/` and `.metadata/` paths are reserved for `hfdown`. A remote model
-containing either path is rejected to prevent accidental collisions.
-
-Legacy `hfdown-metadata/`, `.hfdown/`, `.metadata/tmp/`, and
-`.hfdown/partials/` layouts are migrated automatically.
+`tmp/` is deliberately visible. `tmp/` and `.metadata/` are reserved; a
+remote repository containing either path is rejected. Legacy
+`hfdown-metadata/`, `.hfdown/`, `.metadata/tmp/`, and `.hfdown/partials/`
+layouts are migrated automatically.
 
 ## Hash and metadata policy
 
-- The repository revision is resolved to a commit SHA before downloading.
-- Every download URL uses that resolved commit.
+- The requested revision is resolved to a commit SHA before transfer.
+- Every file URL uses that exact commit.
 - Normal Git files are checked against Git blob SHA-1
   (`blob <size>\0<content>`).
-- Git LFS files are checked against the Hub-provided LFS SHA-256.
-- Every local model file receives an additional raw-content SHA-256 entry.
+- Git LFS files are checked against Hub-provided LFS SHA-256.
+- Every local managed file also receives a raw-content SHA-256 entry.
 
-After a successful download or verification, `.sha256` is written in standard
-`sha256sum` format:
+After a successful download or verification, `.sha256` uses standard
+`sha256sum` syntax:
 
 ```bash
 cd ./FluidInference_silero-vad-coreml
 sha256sum -c .sha256
 ```
 
-`.metadata/repository.json` stores the latest Hub metadata response together
-with the requested revision, resolved commit, fetch time, creation time, and
-last-modified time. `.metadata/repository-history.jsonl` keeps a compact
-append-only history of metadata checks.
-
-`.metadata/manifest.json` stores file hashes and verification state.
-`.metadata/verification-history.jsonl` stores verification-run summaries.
+`.metadata/repository.json` archives the latest Hub API response, repository
+type, requested revision, resolved commit, fetch time, creation time, and Hub
+last-modified time. `repository-history.jsonl` records every metadata check.
+`manifest.json` stores local and remote hashes plus validation state, while
+`verification-history.jsonl` records verification summaries.
 
 ## Configuration file
 
-If `.hfdown.json` exists in the current directory, it is loaded automatically.
-Use `--config FILE` to select a different file. Command-line options override
+`.hfdown.json` in the current directory is loaded automatically. Use
+`--config FILE` to select another file. Command-line options override scalar
 configuration values.
 
 ```json
@@ -294,6 +316,7 @@ configuration values.
   "endpoint": "https://huggingface.co",
   "revision": "main",
   "output": "",
+  "filters": ["*.json|*.gguf"],
   "parts": 4,
   "multipart_threshold": 67108864,
   "buffer_size": 1048576,
@@ -304,7 +327,7 @@ configuration values.
 }
 ```
 
-Do not store a token in the configuration file. Use `token_env` or `--token`.
+Do not store a token in this file. Use `token_env` or `--token`.
 
 ## License
 

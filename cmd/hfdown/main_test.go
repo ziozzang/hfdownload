@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/ziozzang/hfdownload/internal/hub"
 )
 
 func TestBatchQueueAndCachedRerun(t *testing.T) {
@@ -266,6 +268,104 @@ func TestRepoUpdateDownloadsOnlyChangedFile(t *testing.T) {
 	history, err := os.ReadFile(filepath.Join(output, ".metadata", "repository-history.jsonl"))
 	if err != nil || strings.Count(strings.TrimSpace(string(history)), "\n") != 1 {
 		t.Fatalf("metadata history should contain two events: %s, %v", history, err)
+	}
+}
+
+func TestDatasetAliasTagAndCaseInsensitiveFilters(t *testing.T) {
+	files := map[string][]byte{
+		"nested/ONE.JSON":         []byte("json-data"),
+		"tables/TWO.PARQUET":      []byte("parquet-data"),
+		"weights/MODEL_Q4_0.GGUF": []byte("gguf-data"),
+		"skip.txt":                []byte("not-selected"),
+	}
+	const commit = "3333333333333333333333333333333333333333"
+	var metadataRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/datasets/owner/data/revision/v1.2.0" {
+			metadataRequests.Add(1)
+			siblings := make([]map[string]any, 0, len(files))
+			for name, content := range files {
+				siblings = append(siblings, map[string]any{"rfilename": name, "blobId": gitBlobID(content), "size": len(content)})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "owner/data", "sha": commit, "siblings": siblings})
+			return
+		}
+		prefix := "/datasets/owner/data/resolve/" + commit + "/"
+		if !strings.HasPrefix(r.URL.Path, prefix) {
+			http.NotFound(w, r)
+			return
+		}
+		content, ok := files[strings.TrimPrefix(r.URL.Path, prefix)]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		var start, end int
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(content[start : end+1])
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "dataset_owner_data")
+	err := run(context.Background(), []string{
+		"ds", "--endpoint", server.URL, "--output", output, "--tag", "v1.2.0",
+		"--parts", "1", "--filter", "*.json|*.parquet|*_q4_?.gguf", "owner/data",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadataRequests.Load() != 1 {
+		t.Fatalf("dataset metadata requests = %d", metadataRequests.Load())
+	}
+	for name, want := range files {
+		got, readErr := os.ReadFile(filepath.Join(output, filepath.FromSlash(name)))
+		if name == "skip.txt" {
+			if !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("unmatched file was downloaded: %v", readErr)
+			}
+			continue
+		}
+		if readErr != nil || string(got) != string(want) {
+			t.Fatalf("dataset file %s = %q, %v", name, got, readErr)
+		}
+	}
+	manifest, err := os.ReadFile(filepath.Join(output, ".metadata", "manifest.json"))
+	if err != nil || !strings.Contains(string(manifest), `"repo_type": "dataset"`) {
+		t.Fatalf("dataset manifest: %s, %v", manifest, err)
+	}
+}
+
+func TestFilterRepoFilesRepeatedAndInvalid(t *testing.T) {
+	files := []hub.RepoFile{
+		{Path: "config.JSON"},
+		{Path: "nested/data.PARQUET"},
+		{Path: "weights/model_Q8_0.GGUF"},
+		{Path: "notes.txt"},
+	}
+	got, err := filterRepoFiles(files, []string{"*.json|*.parquet", "weights/*_q8_?.gguf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("selected files = %#v", got)
+	}
+	if _, err := filterRepoFiles(files, []string{"*.safetensors"}); err == nil {
+		t.Fatal("zero-match filter did not fail")
+	}
+	if _, err := filterRepoFiles(files, []string{"[broken"}); err == nil {
+		t.Fatal("invalid glob did not fail")
+	}
+}
+
+func TestNormalizeDatasetURL(t *testing.T) {
+	got, err := hub.NormalizeRepoID("https://huggingface.co/datasets/lhoestq/demo1")
+	if err != nil || got != "lhoestq/demo1" {
+		t.Fatalf("dataset URL = %q, %v", got, err)
 	}
 }
 
