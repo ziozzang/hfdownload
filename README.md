@@ -13,7 +13,8 @@ with HTTP Range requests, and verifies them against Git blob or Git LFS hashes.
 - Model and dataset repositories, pinned to a resolved commit SHA
 - Full-repository or case-insensitive glob-filtered downloads
 - Multipart HTTP Range downloads with resume enabled by default
-- Automatic reconnection that drops and resumes stalled or too-slow connections
+- Randomized-backoff retries for server errors (5xx/429) and stalled or too-slow
+  connections, with an optional retry-until-success mode for extended outages
 - Constant-size I/O buffers; files are never held entirely in memory
 - Git blob SHA-1 or Git LFS SHA-256 verification for every downloaded file
 - Raw local SHA-256 and SHA-1 entries in `.sha256` and `.sha1sum`
@@ -151,7 +152,8 @@ unselected files are retained in the manifest and checksum files.
 - `--multipart-threshold 64MiB`: minimum size for multipart mode
 - `--resume=true`: resume compatible partial downloads
 - `--buffer-size 1MiB`: memory buffer used by each active range
-- `--retries 5`: retry count for each range
+- `--retries 5`: retries per range and per API call for transient errors (5xx, 429, network); `-1` retries until success. Genuine client errors (404, 401, 403) are never retried
+- `--retry-min-wait 1` / `--retry-max-wait 300`: bounds (seconds) for the randomized backoff between retries; the wait grows from the minimum up to the maximum with jitter, so during an outage it settles between roughly half and all of the maximum
 - `--stall-timeout 60`: reconnect and resume a range after this many seconds without progress; `0` disables stall detection
 - `--min-speed 1MiB`: reconnect and resume a range (connection) that averages below this rate over a short window; `0` disables the floor. With `--parts N` the floor is per connection, so the whole-file rate can be up to `N ×` this value
 - `--min-speed-window 5`: averaging window (seconds) used by `--min-speed`; a shorter window reacts faster but is more sensitive to brief dips
@@ -237,9 +239,17 @@ Resume mode is enabled by default.
 - Files without a current validation record are scanned once before download.
 - A connection that goes silent for `--stall-timeout` seconds, or that averages
   below `--min-speed` over `--min-speed-window` seconds, is dropped and resumed
-  on a fresh connection from the last received offset. Each reconnect prints a
-  line such as `... too slow: below 1.0 MiB/s over 5s; reconnecting to resume at
-  128.0 MiB`. A file gives up only after `--retries` reconnects all fail.
+  on a fresh connection from the last received offset.
+- Transient failures — server errors (5xx), rate limiting (429), network drops,
+  and the stall/slow aborts above — are retried with randomized backoff, both
+  for range downloads and for the metadata API call. Set `--retries -1` to keep
+  retrying until success, which rides out extended outages (for example repeated
+  503s) instead of failing the run. Genuine client errors (404, 401, 403) are
+  terminal and stop immediately. Each retry prints a line such as `... HTTP 503;
+  retrying in 4m12s (resume at 128.0 MiB)`.
+- The `--retries` budget counts *consecutive* failures: any forward progress
+  resets it and reconnects immediately, so once a server recovers a large file
+  keeps going as long as it advances rather than exhausting a fixed count.
 
 ## Progress display
 
@@ -344,6 +354,8 @@ configuration values.
   "multipart_threshold": 67108864,
   "buffer_size": 1048576,
   "retries": 5,
+  "retry_min_wait_seconds": 1,
+  "retry_max_wait_seconds": 300,
   "timeout_seconds": 30,
   "stall_timeout_seconds": 60,
   "min_speed": 0,

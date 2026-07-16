@@ -105,6 +105,9 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		token = os.Getenv(cfg.TokenEnv)
 	}
 	client := hub.New(cfg.Endpoint, token, time.Duration(cfg.TimeoutSeconds)*time.Second)
+	client.Retries = cfg.Retries
+	client.RetryMinWait = time.Duration(cfg.RetryMinWaitSeconds) * time.Second
+	client.RetryMaxWait = time.Duration(cfg.RetryMaxWaitSeconds) * time.Second
 	fmt.Fprintf(os.Stderr, "resolving %s@%s...\n", repoID, cfg.Revision)
 	info, err := client.RepoInfo(ctx, repoType, repoID, cfg.Revision)
 	if err != nil {
@@ -180,8 +183,11 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	var networkBytes, resumedBytes atomic.Int64
 	d := download.Downloader{Client: client, Root: root, StateDir: stateDir, TempDir: filepath.Join(root, "tmp"), RepoType: repoType, Options: download.Options{
 		Parts: cfg.Parts, MultipartThreshold: cfg.MultipartThreshold, BufferSize: cfg.BufferSize,
-		Retries: cfg.Retries, StallTimeout: time.Duration(cfg.StallTimeoutSeconds) * time.Second,
-		MinSpeed: cfg.MinSpeed, MinSpeedWindow: time.Duration(cfg.MinSpeedWindowSeconds) * time.Second, Resume: cfg.Resume,
+		Retries:      cfg.Retries,
+		RetryMinWait: time.Duration(cfg.RetryMinWaitSeconds) * time.Second,
+		RetryMaxWait: time.Duration(cfg.RetryMaxWaitSeconds) * time.Second,
+		StallTimeout: time.Duration(cfg.StallTimeoutSeconds) * time.Second,
+		MinSpeed:     cfg.MinSpeed, MinSpeedWindow: time.Duration(cfg.MinSpeedWindowSeconds) * time.Second, Resume: cfg.Resume,
 	}, Progress: overall,
 		OnNetworkBytes: func(n int64) { networkBytes.Add(n) },
 		OnResumedBytes: func(n int64) { resumedBytes.Add(n) },

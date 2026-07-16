@@ -16,6 +16,13 @@ type Client struct {
 	Endpoint string
 	Token    string
 	HTTP     *http.Client
+	// Retries bounds retries for retriable API failures (5xx/429/network).
+	// A negative value retries until success or a terminal error.
+	Retries int
+	// RetryMinWait and RetryMaxWait bound the randomized retry backoff; zero
+	// values fall back to 1s and 5m.
+	RetryMinWait time.Duration
+	RetryMaxWait time.Duration
 }
 
 type RepoType string
@@ -92,45 +99,75 @@ func (c *Client) RepoInfo(ctx context.Context, repoType RepoType, repoID, revisi
 		collection = "datasets"
 	}
 	u := c.Endpoint + "/api/" + collection + "/" + escapeRepo(repoID) + "/revision/" + url.PathEscape(revision) + "?blobs=true"
+
+	unlimited := c.Retries < 0
+	minWait, maxWait := RetryWaits(c.RetryMinWait, c.RetryMaxWait)
+	var lastErr error
+	for attempt := 0; unlimited || attempt <= c.Retries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(RetryDelay(attempt-1, minWait, maxWait)):
+			}
+		}
+		info, retriable, err := c.fetchRepoInfo(ctx, u)
+		if err == nil {
+			return info, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !retriable {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// fetchRepoInfo performs a single metadata request. The bool reports whether a
+// failure is retriable (transient server/network error) versus terminal.
+func (c *Client) fetchRepoInfo(ctx context.Context, u string) (*RepoInfo, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	c.setHeaders(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("repository metadata: %w", err)
+		return nil, true, fmt.Errorf("repository metadata: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, responseError("repository metadata", resp)
+		return nil, RetriableStatus(resp.StatusCode), responseError("repository metadata", resp)
 	}
 	const maxMetadataSize = 64 << 20
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("repository metadata read: %w", err)
+		return nil, true, fmt.Errorf("repository metadata read: %w", err)
 	}
 	if len(b) > maxMetadataSize {
-		return nil, fmt.Errorf("repository metadata exceeds %d bytes", maxMetadataSize)
+		return nil, false, fmt.Errorf("repository metadata exceeds %d bytes", maxMetadataSize)
 	}
 	var info RepoInfo
 	if err := json.Unmarshal(b, &info); err != nil {
-		return nil, fmt.Errorf("repository metadata decode: %w", err)
+		return nil, false, fmt.Errorf("repository metadata decode: %w", err)
 	}
 	info.RawMetadata = append(json.RawMessage(nil), b...)
 	if info.SHA == "" {
-		return nil, fmt.Errorf("repository metadata did not contain a commit SHA")
+		return nil, false, fmt.Errorf("repository metadata did not contain a commit SHA")
 	}
 	for i := range info.Siblings {
 		f := &info.Siblings[i]
 		if f.Path == "" || f.Size < 0 {
-			return nil, fmt.Errorf("invalid file metadata at index %d", i)
+			return nil, false, fmt.Errorf("invalid file metadata at index %d", i)
 		}
 		if f.LFS != nil && f.LFS.Size > 0 && f.Size != f.LFS.Size {
-			return nil, fmt.Errorf("inconsistent size metadata for %q", f.Path)
+			return nil, false, fmt.Errorf("inconsistent size metadata for %q", f.Path)
 		}
 	}
-	return &info, nil
+	return &info, false, nil
 }
 
 func (c *Client) DownloadURL(repoType RepoType, repoID, commitSHA, filePath string) string {

@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 type settings struct {
 	Endpoint              string   `json:"endpoint"`
@@ -22,6 +22,8 @@ type settings struct {
 	MultipartThreshold    int64    `json:"multipart_threshold"`
 	BufferSize            int      `json:"buffer_size"`
 	Retries               int      `json:"retries"`
+	RetryMinWaitSeconds   int      `json:"retry_min_wait_seconds"`
+	RetryMaxWaitSeconds   int      `json:"retry_max_wait_seconds"`
 	TimeoutSeconds        int      `json:"timeout_seconds"`
 	StallTimeoutSeconds   int      `json:"stall_timeout_seconds"`
 	MinSpeed              int64    `json:"min_speed"`
@@ -53,7 +55,8 @@ type queueJob struct {
 
 func defaults() settings {
 	return settings{Endpoint: "https://huggingface.co", Revision: "main", Output: "", Parts: 4,
-		MultipartThreshold: 64 << 20, BufferSize: 1 << 20, Retries: 5, TimeoutSeconds: 30,
+		MultipartThreshold: 64 << 20, BufferSize: 1 << 20, Retries: 5,
+		RetryMinWaitSeconds: 1, RetryMaxWaitSeconds: 300, TimeoutSeconds: 30,
 		StallTimeoutSeconds: 60, MinSpeedWindowSeconds: 5, Resume: true, TokenEnv: "HF_TOKEN"}
 }
 

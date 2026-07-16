@@ -28,7 +28,13 @@ type Options struct {
 	Parts              int
 	MultipartThreshold int64
 	BufferSize         int
-	Retries            int
+	// Retries bounds retries per range for retriable failures (5xx/429/network/
+	// stall/slow). A negative value retries until success or a terminal error.
+	Retries int
+	// RetryMinWait and RetryMaxWait bound the randomized retry backoff; zero
+	// values fall back to 1s and 5m.
+	RetryMinWait time.Duration
+	RetryMaxWait time.Duration
 	// StallTimeout aborts and retries a range whose stream delivers no bytes
 	// for this long. Zero disables stall detection (a hung connection then
 	// blocks until the OS or server tears it down).
@@ -260,9 +266,8 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 	}
 	buf := make([]byte, bufSize)
 	retries := d.Options.Retries
-	if retries < 0 {
-		retries = 0
-	}
+	unlimited := retries < 0
+	minWait, maxWait := hub.RetryWaits(d.Options.RetryMinWait, d.Options.RetryMaxWait)
 	stallTimeout := d.Options.StallTimeout
 	minSpeed := d.Options.MinSpeed
 	minSpeedWindow := d.Options.MinSpeedWindow
@@ -271,18 +276,11 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 	}
 	rawURL := d.Client.DownloadURL(d.RepoType, repoID, commitSHA, remotePath)
 	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
+	failures := 0 // consecutive attempts without forward progress
+	for {
 		start, end := t.bounds(index)
 		if start > end {
 			return nil
-		}
-		if attempt > 0 {
-			delay := time.Duration(1<<min(attempt-1, 5)) * time.Second
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
-			}
 		}
 
 		// Each attempt runs under its own cancelable context so a stall
@@ -315,7 +313,7 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 			if resp.StatusCode != http.StatusPartialContent {
 				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 				lastErr = fmt.Errorf("range %d-%d: HTTP %s: %s", start, end, resp.Status, strings.TrimSpace(string(body)))
-				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+				if !hub.RetriableStatus(resp.StatusCode) {
 					return false, lastErr
 				}
 				return false, nil
@@ -385,19 +383,33 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 		if err != nil {
 			return err
 		}
-		if stalled.Load() || slow.Load() {
-			reason := fmt.Sprintf("stalled: no data for %s", stallTimeout)
-			if slow.Load() {
-				reason = fmt.Sprintf("too slow: below %s over %s", humanRate(minSpeed), minSpeedWindow)
-			}
-			lastErr = fmt.Errorf("range %d-%d %s", start, end, reason)
-			resumeAt, _ := t.bounds(index)
-			if attempt < retries {
-				bar.Logf("%s: range %d-%d %s; reconnecting to resume at %s\n", remotePath, start, end, reason, formatSize(resumeAt))
-			}
+		if stalled.Load() {
+			lastErr = fmt.Errorf("range %d-%d stalled: no data for %s", start, end, stallTimeout)
+		} else if slow.Load() {
+			lastErr = fmt.Errorf("range %d-%d too slow: below %s over %s", start, end, humanRate(minSpeed), minSpeedWindow)
+		}
+		// If the server delivered any bytes this attempt, it has recovered:
+		// reset the backoff and retry budget and reconnect immediately, so a long
+		// transfer over a flaky link keeps going as long as it makes progress.
+		after, _ := t.bounds(index)
+		if after > start {
+			failures = 0
+			bar.Logf("%s: %v; reconnecting to resume at %s\n", remotePath, lastErr, formatSize(after))
+			continue
+		}
+		failures++
+		if !unlimited && failures > retries {
+			break
+		}
+		delay := hub.RetryDelay(failures-1, minWait, maxWait)
+		bar.Logf("%s: %v; retrying in %s (resume at %s)\n", remotePath, lastErr, delay.Round(time.Millisecond), formatSize(after))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
 		}
 	}
-	return fmt.Errorf("download %q segment %d failed after %d attempt(s): %w", remotePath, index+1, retries+1, lastErr)
+	return fmt.Errorf("download %q segment %d failed after %d consecutive attempt(s): %w", remotePath, index+1, failures, lastErr)
 }
 
 // watchAttempt aborts an attempt that either makes no progress for stallTimeout

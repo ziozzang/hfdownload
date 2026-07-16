@@ -53,8 +53,14 @@ func validateSettings(cfg settings) error {
 	if cfg.BufferSize < 32<<10 || cfg.BufferSize > 64<<20 {
 		return fmt.Errorf("buffer-size must be between 32KiB and 64MiB")
 	}
-	if cfg.Retries < 0 || cfg.Retries > 100 {
-		return fmt.Errorf("retries must be between 0 and 100")
+	if cfg.Retries < -1 || cfg.Retries > 1000 {
+		return fmt.Errorf("retries must be between -1 (unlimited) and 1000")
+	}
+	if cfg.RetryMinWaitSeconds < 1 {
+		return fmt.Errorf("retry-min-wait must be positive")
+	}
+	if cfg.RetryMaxWaitSeconds < cfg.RetryMinWaitSeconds {
+		return fmt.Errorf("retry-max-wait must be at least retry-min-wait")
 	}
 	if cfg.TimeoutSeconds < 1 {
 		return fmt.Errorf("timeout must be positive")

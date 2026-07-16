@@ -309,6 +309,139 @@ func TestStallTimeoutAbortsAndResumes(t *testing.T) {
 	}
 }
 
+// TestServerErrorRetriesAndCompletes verifies that transient 5xx responses are
+// retried (not treated as terminal) until the range finally downloads.
+func TestServerErrorRetriesAndCompletes(t *testing.T) {
+	const size = 256 << 10
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte((i*7 + 1) % 251)
+	}
+	sum := sha256.Sum256(data)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) <= 2 {
+			http.Error(w, "backend down", http.StatusServiceUnavailable)
+			return
+		}
+		var start, end int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start : end+1])
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	d := Downloader{
+		Client: hub.New(server.URL, "", 5*time.Second), Root: root,
+		StateDir: filepath.Join(root, ".metadata"),
+		Options: Options{
+			Parts: 1, MultipartThreshold: 1, BufferSize: 64 << 10, Retries: 5,
+			RetryMinWait: time.Millisecond, RetryMaxWait: 10 * time.Millisecond, Resume: true,
+		},
+	}
+	remote := hub.RepoFile{Path: "weights/model.bin", Size: int64(len(data)), LFS: &hub.LFSInfo{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))}}
+	if _, err := d.Download(context.Background(), "owner/model", "commit", remote); err != nil {
+		t.Fatalf("download did not recover from 503: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "weights", "model.bin"))
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("recovered file differs: size=%d, err=%v", len(got), err)
+	}
+	if n := attempts.Load(); n < 3 {
+		t.Fatalf("expected retries past the 503 responses, got %d attempts", n)
+	}
+}
+
+// TestClientErrorDoesNotRetry verifies that a genuine client error (404) fails
+// immediately instead of being retried as if transient.
+func TestClientErrorDoesNotRetry(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "no such file", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	d := Downloader{
+		Client: hub.New(server.URL, "", 5*time.Second), Root: root,
+		StateDir: filepath.Join(root, ".metadata"),
+		Options: Options{
+			Parts: 1, MultipartThreshold: 1, BufferSize: 64 << 10, Retries: 5,
+			RetryMinWait: time.Millisecond, RetryMaxWait: 10 * time.Millisecond, Resume: true,
+		},
+	}
+	remote := hub.RepoFile{Path: "weights/model.bin", Size: 1024, BlobID: "pointer"}
+	if _, err := d.Download(context.Background(), "owner/model", "commit", remote); err == nil {
+		t.Fatal("expected 404 to fail the download")
+	}
+	if n := attempts.Load(); n != 1 {
+		t.Fatalf("404 is terminal; expected 1 attempt, got %d", n)
+	}
+}
+
+// TestProgressResetsRetryBudget verifies that forward progress clears the
+// consecutive-failure budget: every connection is cut mid-stream after a partial
+// chunk, yet with only Retries=1 the file still completes because each attempt
+// advances the offset.
+func TestProgressResetsRetryBudget(t *testing.T) {
+	const size = 256 << 10
+	const chunk = 64 << 10
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte((i*11 + 9) % 251)
+	}
+	sum := sha256.Sum256(data)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		var start, end int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		// Advertise the full requested range but deliver only a partial chunk,
+		// then return so the client sees a truncated body and must reconnect.
+		deliver := start + chunk
+		if deliver > end+1 {
+			deliver = end + 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start:deliver])
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	d := Downloader{
+		Client: hub.New(server.URL, "", 5*time.Second), Root: root,
+		StateDir: filepath.Join(root, ".metadata"),
+		Options: Options{
+			Parts: 1, MultipartThreshold: 1, BufferSize: 32 << 10, Retries: 1,
+			RetryMinWait: time.Millisecond, RetryMaxWait: 10 * time.Millisecond, Resume: true,
+		},
+	}
+	remote := hub.RepoFile{Path: "weights/model.bin", Size: int64(len(data)), LFS: &hub.LFSInfo{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))}}
+	if _, err := d.Download(context.Background(), "owner/model", "commit", remote); err != nil {
+		t.Fatalf("download stalled despite making progress each attempt: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "weights", "model.bin"))
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("recovered file differs: size=%d, err=%v", len(got), err)
+	}
+	// size/chunk partial deliveries are needed; far more than Retries+1 = 2.
+	if n := attempts.Load(); n < size/chunk {
+		t.Fatalf("expected at least %d reconnects, got %d", size/chunk, n)
+	}
+}
+
 // TestMinSpeedAbortsAndResumes verifies that a connection which keeps trickling
 // bytes (so the stall timeout never fires) but averages below MinSpeed is torn
 // down after MinSpeedWindow, and that the retry resumes rather than restarts.
@@ -390,8 +523,8 @@ func TestMinSpeedAbortsAndResumes(t *testing.T) {
 	if err != nil || string(got) != string(data) {
 		t.Fatalf("recovered file differs: size=%d, err=%v", len(got), err)
 	}
-	if !strings.Contains(logBuf.String(), "reconnecting to resume") {
-		t.Fatalf("expected a visible reconnect log, got: %q", logBuf.String())
+	if log := logBuf.String(); !strings.Contains(log, "too slow") || !strings.Contains(log, "resume at") {
+		t.Fatalf("expected a visible slow-retry log, got: %q", log)
 	}
 
 	mu.Lock()
