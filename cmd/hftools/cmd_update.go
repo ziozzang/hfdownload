@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/ziozzang/hftools/internal/selfupdate"
@@ -102,5 +103,8 @@ func updateCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("updated %s: %s -> %s\n", exe, version, latest)
+	if notes := strings.TrimSpace(rel.Body); notes != "" {
+		fmt.Printf("\n--- release notes for %s ---\n%s\n", rel.TagName, notes)
+	}
 	return nil
 }

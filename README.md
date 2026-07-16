@@ -76,22 +76,26 @@ hftools update --version v0.8.1 # install a specific release tag
 ```
 
 `update` fetches the matching build for your platform from the GitHub release,
-verifies its SHA-256 against the release `SHA256SUMS` before installing, and
-replaces the running executable in place (moving the old one aside on Windows).
-If the binary lives in a system directory, run it with elevated privileges.
-Set `GITHUB_TOKEN` to raise the API rate limit.
+verifies its SHA-256 against the release `SHA256SUMS` before installing, replaces
+the running executable in place (moving the old one aside on Windows), and prints
+the new release's notes. If the binary lives in a system directory, run it with
+elevated privileges. Set `GITHUB_TOKEN` to raise the API rate limit.
 
 hftools also prints a one-line notice after a command when a newer release is
 available:
 
 ```text
-hftools 0.9.1 is available (you have 0.9.0). Run 'hftools update' to upgrade.
+hftools 0.9.2 is available (you have 0.9.1). Run 'hftools update' to upgrade.
 ```
 
-The check runs at most once a day (the result is cached), only when output is a
-terminal — so it never disturbs scripts or piped output — and it never blocks or
-fails the command. It never installs anything; upgrading is always the explicit
-`hftools update`. Disable it entirely with `HFTOOLS_NO_UPDATE_CHECK=1`.
+The version lookup runs in the **background** and the foreground never waits on
+it, so an offline or air-gapped machine is never slowed down — the check simply
+times out and soft-fails silently. The notice itself is printed from a cached
+result (refreshed at most once a day), only when output is a terminal, so scripts
+and piped output are never disturbed. It never installs anything; upgrading is
+always the explicit `hftools update`. `hftools doctor` shows the current check
+status (up to date / update available / could not reach GitHub). Disable the
+whole thing with `HFTOOLS_NO_UPDATE_CHECK=1`.
 
 ## Authentication
 

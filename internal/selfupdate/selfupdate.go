@@ -25,6 +25,8 @@ const DefaultAPIBase = "https://api.github.com"
 // Release is the subset of a GitHub release we consume.
 type Release struct {
 	TagName string  `json:"tag_name"`
+	Name    string  `json:"name"`
+	Body    string  `json:"body"`
 	Assets  []Asset `json:"assets"`
 }
 

@@ -17,7 +17,7 @@ import (
 const updateCheckInterval = 24 * time.Hour
 
 // notifyExemptCommands are commands for which an update notice would be noise or
-// redundant (or which are long-lived / non-interactive).
+// redundant.
 var notifyExemptCommands = map[string]bool{
 	"": true, "update": true, "self-update": true, "version": true,
 	"--version": true, "-version": true, "-v": true, "-V": true,
@@ -29,29 +29,61 @@ type updateCache struct {
 	Latest    string    `json:"latest_version"`
 }
 
-// maybeNotifyUpdate prints a single-line notice when a newer release is
-// available. It is deliberately unobtrusive: it does nothing when output is not
-// a terminal (scripts/pipes), when HFTOOLS_NO_UPDATE_CHECK is set, or for
-// exempt commands, and it never blocks for long or surfaces errors.
-func maybeNotifyUpdate(ctx context.Context, args []string) {
+// updateCheckEligible reports whether the update machinery should run at all: it
+// stays silent in scripts and pipes (non-terminal stderr), when disabled via
+// HFTOOLS_NO_UPDATE_CHECK, and for exempt commands.
+func updateCheckEligible(args []string) bool {
 	if os.Getenv("HFTOOLS_NO_UPDATE_CHECK") != "" {
-		return
+		return false
 	}
 	cmd := ""
 	if len(args) > 0 {
 		cmd = args[0]
 	}
 	if notifyExemptCommands[cmd] {
+		return false
+	}
+	return stderrIsTerminal()
+}
+
+// startUpdateRefresh kicks off a background version check when the cached result
+// is stale, then returns immediately. The foreground never waits on it, so an
+// offline or air-gapped machine is never slowed down: the goroutine simply times
+// out and soft-fails, writing nothing. A successful check updates the cache that
+// the notice reads (this run if it finishes in time, otherwise the next).
+func startUpdateRefresh(args []string) {
+	if !updateCheckEligible(args) {
 		return
 	}
-	if !stderrIsTerminal() {
+	path := updateCachePath()
+	c := readUpdateCache(path)
+	if c.Latest != "" && time.Since(c.CheckedAt) < updateCheckInterval {
+		return // cached result is still fresh; no network needed
+	}
+	go func() {
+		// Its own context so a fast foreground command finishing does not cancel
+		// the check prematurely; the process exiting ends it regardless.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		rel, err := selfupdate.LatestRelease(ctx, &http.Client{}, "", updateRepo, os.Getenv("GITHUB_TOKEN"))
+		if err != nil {
+			return // soft-fail: offline/air-gapped or GitHub down -> do nothing
+		}
+		writeUpdateCache(path, updateCache{CheckedAt: time.Now(), Latest: rel.Version()})
+	}()
+}
+
+// maybeNotifyUpdate prints a one-line notice built from the cached latest
+// version. It performs no network I/O, so it is instant and safe offline.
+func maybeNotifyUpdate(args []string) {
+	if !updateCheckEligible(args) {
 		return
 	}
-	latest, ok := latestKnownVersion(ctx)
-	if !ok {
+	c := readUpdateCache(updateCachePath())
+	if c.Latest == "" {
 		return
 	}
-	if notice := updateNoticeText(latest, version); notice != "" {
+	if notice := updateNoticeText(c.Latest, version); notice != "" {
 		fmt.Fprintf(os.Stderr, "\n%s\n", notice)
 	}
 }
@@ -63,28 +95,6 @@ func updateNoticeText(latest, current string) string {
 		return fmt.Sprintf("hftools %s is available (you have %s). Run 'hftools update' to upgrade.", latest, current)
 	}
 	return ""
-}
-
-// latestKnownVersion returns the latest release version, reusing a cached value
-// while it is fresh and otherwise refreshing it with a short, failure-tolerant
-// network call.
-func latestKnownVersion(ctx context.Context) (string, bool) {
-	path := updateCachePath()
-	cache := readUpdateCache(path)
-	if cache.Latest != "" && time.Since(cache.CheckedAt) < updateCheckInterval {
-		return cache.Latest, true
-	}
-	// Stale or missing: refresh with a short timeout so we never hold up the
-	// shell for long, and ignore any failure (offline is expected and fine).
-	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	rel, err := selfupdate.LatestRelease(cctx, &http.Client{}, "", updateRepo, os.Getenv("GITHUB_TOKEN"))
-	if err != nil {
-		return cache.Latest, cache.Latest != "" // fall back to any previous value
-	}
-	cache = updateCache{CheckedAt: time.Now(), Latest: rel.Version()}
-	writeUpdateCache(path, cache)
-	return cache.Latest, cache.Latest != ""
 }
 
 func updateCachePath() string {
@@ -111,7 +121,7 @@ func writeUpdateCache(path string, c updateCache) {
 	if err != nil {
 		return
 	}
-	// Write atomically so concurrent hftools processes never read a half file.
+	// Write atomically so a concurrent hftools process never reads a half file.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".update-check-*")
 	if err != nil {
 		return

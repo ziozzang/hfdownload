@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ziozzang/hftools/internal/hfcache"
+	"github.com/ziozzang/hftools/internal/selfupdate"
 )
 
 type doctorCheck struct {
@@ -97,6 +98,20 @@ func doctorCommand(ctx context.Context, args []string) error {
 		add("hf cache", "warn", err.Error())
 	} else {
 		add("hf cache", "ok", fmt.Sprintf("%s (%d repositories)", cacheRoot, len(repos)))
+	}
+
+	// Update availability. This is where an air-gapped "could not check" surfaces,
+	// so the per-command notice can stay silent.
+	uctx, ucancel := context.WithTimeout(ctx, 5*time.Second)
+	rel, uerr := selfupdate.LatestRelease(uctx, &http.Client{}, "", updateRepo, os.Getenv("GITHUB_TOKEN"))
+	ucancel()
+	switch {
+	case uerr != nil:
+		add("update", "warn", "could not reach GitHub to check for updates (offline?)")
+	case selfupdate.CompareVersions(rel.Version(), version) > 0:
+		add("update", "warn", fmt.Sprintf("%s available — run 'hftools update'", rel.Version()))
+	default:
+		add("update", "ok", "on the latest release ("+version+")")
 	}
 
 	if *jsonOut {
