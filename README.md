@@ -22,6 +22,7 @@ with HTTP Range requests, and verifies them against Git blob or Git LFS hashes.
 - Plain-text lists and per-job JSON queues
 - Recursive batch verification and forced full rehashing
 - Incremental updates that fetch only remotely changed files
+- Convert to and from the Hugging Face cache layout for offline / air-gapped use
 - Static binaries for macOS, Windows, and Linux on ARM64 and x86-64
 
 ## Install and build
@@ -287,6 +288,42 @@ Run the same download or batch command later to check for an update. The
 requested revision is resolved again, and files are compared by Git blob or
 Git LFS object hash. Only changed files are downloaded. A literal commit SHA
 keeps the download pinned.
+
+## Offline use and the Hugging Face cache
+
+For air-gapped machines you can move a download between hfdown's flat layout and
+the `huggingface_hub` cache layout, so the Python libraries (`transformers`,
+`diffusers`, `datasets`, …) can load it offline.
+
+```bash
+# Flat download -> HF cache (blobs + snapshot symlinks + refs)
+hfdown cache-export --output ./owner_model --cache ~/.cache/huggingface/hub
+
+# HF cache snapshot -> flat download directory (hashes and verifies every file)
+hfdown cache-import --repo owner/model --cache ~/.cache/huggingface/hub --output ./owner_model
+```
+
+- `cache-export` reads the download's manifest and writes
+  `models--owner--model/{blobs,snapshots/<commit>,refs}`. Blobs are named by
+  their Hugging Face etag — the LFS SHA-256 for LFS files, the git blob SHA-1
+  for regular files — which hfdown already records, so nothing is re-hashed.
+  Blobs are hardlinked from the source by default (`--copy` to copy instead);
+  snapshot entries are relative symlinks, falling back to copies where symlinks
+  are unavailable (e.g. Windows).
+- `cache-import` resolves the commit from `refs/<revision>`, then hashes each
+  snapshot file and checks it against its content-addressed blob name, so a
+  corrupt transfer is caught. It writes a fresh hfdown manifest, `.sha256`, and
+  `.sha1sum`, making the result a first-class hfdown directory you can `verify`.
+- `--cache` defaults to `$HF_HUB_CACHE`, then `$HF_HOME/hub`, then
+  `~/.cache/huggingface/hub`. `--type dataset` handles dataset repositories.
+
+To use an exported cache offline, point the HF libraries at it and disable
+network access:
+
+```bash
+export HF_HOME=/path/to/huggingface        # parent of the hub/ directory
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+```
 
 ## Repository layout
 

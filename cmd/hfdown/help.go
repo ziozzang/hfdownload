@@ -33,6 +33,10 @@ func helpCommand(ctx context.Context, args []string) error {
 		err = verifyBatchCommand([]string{"-h"})
 	case "status":
 		err = statusCommand([]string{"-h"})
+	case "cache-export":
+		err = cacheExportCommand([]string{"-h"})
+	case "cache-import":
+		err = cacheImportCommand([]string{"-h"})
 	case "version":
 		printVersion(os.Stdout)
 		return nil
@@ -61,6 +65,8 @@ Commands:
   verify             Verify one downloaded repository
   verify-batch       Recursively verify downloaded repositories
   status             Show stored repository status and revision
+  cache-export       Convert a download into the Hugging Face cache layout
+  cache-import       Convert a Hugging Face cache snapshot into a flat directory
   version            Print version and target platform
   help               Show general or command-specific help
 
@@ -71,6 +77,8 @@ Common forms:
   hfdown batch --queue queue.json [options]
   hfdown verify --output DIR [--force]
   hfdown verify-batch --root DIR [--force]
+  hfdown cache-export --output DIR [--cache HF_CACHE]
+  hfdown cache-import --repo OWNER/MODEL [--cache HF_CACHE] --output DIR
 
 Help and version:
   hfdown help [COMMAND]

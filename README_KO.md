@@ -22,6 +22,7 @@ Created by Jioh L. Jung <ziozzang@gmail.com> — [GitHub](https://github.com/zio
 - 단순 텍스트 목록과 작업별 설정이 가능한 JSON 큐
 - 전체 디렉터리 순회 검증과 강제 전수 재해시
 - 원격 객체 해시가 바뀐 파일만 받는 증분 업데이트
+- 오프라인/air-gapped 사용을 위한 Hugging Face 캐시 구조 상호 변환
 - macOS, Windows, Linux의 ARM64/x86-64 정적 바이너리
 
 ## 설치 및 빌드
@@ -283,6 +284,40 @@ hfdown status --output ./FluidInference_silero-vad-coreml
 나중에 같은 다운로드 명령이나 배치 큐를 다시 실행하면 요청 리비전을 새로
 확정합니다. Git blob 또는 Git LFS 객체 해시를 비교하여 변경된 파일만 다시
 받습니다. 리비전에 커밋 SHA를 직접 지정하면 그 커밋에 고정됩니다.
+
+## 오프라인 사용과 Hugging Face 캐시
+
+air-gapped 환경을 위해, 다운로드를 hfdown의 평면(flat) 구조와 `huggingface_hub`
+캐시 구조 사이에서 상호 변환할 수 있습니다. 그러면 Python 라이브러리
+(`transformers`, `diffusers`, `datasets` 등)가 오프라인으로 로드할 수 있습니다.
+
+```bash
+# 평면 다운로드 -> HF 캐시 (blobs + snapshot 심링크 + refs)
+hfdown cache-export --output ./owner_model --cache ~/.cache/huggingface/hub
+
+# HF 캐시 스냅샷 -> 평면 다운로드 디렉터리 (모든 파일 해시·검증)
+hfdown cache-import --repo owner/model --cache ~/.cache/huggingface/hub --output ./owner_model
+```
+
+- `cache-export`는 manifest를 읽어 `models--owner--model/{blobs,snapshots/<commit>,refs}`
+  를 만듭니다. blob 이름은 Hugging Face etag — LFS는 SHA-256, 일반 파일은
+  git blob SHA-1 — 이며 hfdown이 이미 갖고 있어 재해싱하지 않습니다. blob은
+  기본적으로 원본에서 하드링크(`--copy`로 복사)하고, snapshot은 상대 심링크이며
+  심링크가 불가한 환경(예: Windows)에서는 복사로 폴백합니다.
+- `cache-import`는 `refs/<revision>`에서 커밋을 확정한 뒤, 각 snapshot 파일을
+  해시하여 content-addressed blob 이름과 대조하므로 손상된 전송을 잡아냅니다.
+  새 manifest, `.sha256`, `.sha1sum`을 기록하여 결과가 곧바로 `verify` 가능한
+  hfdown 디렉터리가 됩니다.
+- `--cache` 기본값은 `$HF_HUB_CACHE` → `$HF_HOME/hub` → `~/.cache/huggingface/hub`
+  순입니다. 데이터셋은 `--type dataset`.
+
+내보낸 캐시를 오프라인으로 쓰려면 HF 라이브러리가 그 위치를 보게 하고 네트워크를
+끕니다:
+
+```bash
+export HF_HOME=/path/to/huggingface        # hub/ 의 상위 디렉터리
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+```
 
 ## 저장 구조
 

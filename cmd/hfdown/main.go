@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 type settings struct {
 	Endpoint              string   `json:"endpoint"`
@@ -90,6 +90,10 @@ func run(ctx context.Context, args []string) error {
 		return verifyBatchCommand(args[1:])
 	case "status":
 		return statusCommand(args[1:])
+	case "cache-export":
+		return cacheExportCommand(args[1:])
+	case "cache-import":
+		return cacheImportCommand(args[1:])
 	case "version", "--version", "-version", "-v", "-V":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: hfdown version")
