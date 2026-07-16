@@ -1,6 +1,7 @@
 package download
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ziozzang/hfdownload/internal/hub"
+	"github.com/ziozzang/hfdownload/internal/progress"
 )
 
 func TestMultipartResumeAndHashVerification(t *testing.T) {
@@ -213,5 +215,197 @@ func TestExistingShortFileIsAdoptedAndResumed(t *testing.T) {
 	}
 	if !foundPrefix {
 		t.Fatalf("no range resumed at existing size %d: %v", prefixSize, starts)
+	}
+}
+
+// TestStallTimeoutAbortsAndResumes verifies that a connection which delivers
+// some bytes and then goes silent is torn down after StallTimeout, and that the
+// retry resumes from the last received offset rather than restarting at zero.
+func TestStallTimeoutAbortsAndResumes(t *testing.T) {
+	const size = 512 << 10
+	const initial = 64 << 10
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte((i*17 + 3) % 251)
+	}
+	sum := sha256.Sum256(data)
+
+	var mu sync.Mutex
+	var starts []int64
+	var stalledOnce atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start, end int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		if start < 0 || end < start || end >= int64(len(data)) {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		mu.Lock()
+		starts = append(starts, start)
+		mu.Unlock()
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		if stalledOnce.CompareAndSwap(false, true) {
+			// First connection: deliver a prefix, flush it, then go silent so
+			// the client's stall watchdog must fire and abort the read.
+			deliver := start + initial
+			if deliver > end+1 {
+				deliver = end + 1
+			}
+			_, _ = w.Write(data[start:deliver])
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+			select {
+			case <-r.Context().Done(): // client cancelled after the stall timeout
+			case <-time.After(3 * time.Second): // fallback so the goroutine never leaks
+			}
+			return
+		}
+		_, _ = w.Write(data[start : end+1])
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	d := Downloader{
+		Client: hub.New(server.URL, "", 5*time.Second), Root: root,
+		StateDir: filepath.Join(root, ".metadata"),
+		Options: Options{
+			Parts: 1, MultipartThreshold: 1, BufferSize: 32 << 10,
+			Retries: 3, StallTimeout: 100 * time.Millisecond, Resume: true,
+		},
+	}
+	remote := hub.RepoFile{Path: "weights/model.bin", Size: int64(len(data)), LFS: &hub.LFSInfo{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))}}
+
+	if _, err := d.Download(context.Background(), "owner/model", "commit", remote); err != nil {
+		t.Fatalf("stalled download did not recover: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "weights", "model.bin"))
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("recovered file differs: size=%d, err=%v", len(got), err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(starts) < 2 {
+		t.Fatalf("expected a reconnect after the stall, got range starts %v", starts)
+	}
+	if starts[0] != 0 {
+		t.Fatalf("first range should start at 0, got %v", starts)
+	}
+	resumed := false
+	for _, start := range starts[1:] {
+		if start > 0 {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatalf("no resumed (non-zero) range after the stall: %v", starts)
+	}
+}
+
+// TestMinSpeedAbortsAndResumes verifies that a connection which keeps trickling
+// bytes (so the stall timeout never fires) but averages below MinSpeed is torn
+// down after MinSpeedWindow, and that the retry resumes rather than restarts.
+func TestMinSpeedAbortsAndResumes(t *testing.T) {
+	const size = 512 << 10
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte((i*13 + 5) % 251)
+	}
+	sum := sha256.Sum256(data)
+
+	var mu sync.Mutex
+	var starts []int64
+	var slowOnce atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start, end int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		if start < 0 || end < start || end >= int64(len(data)) {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		mu.Lock()
+		starts = append(starts, start)
+		mu.Unlock()
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		flusher, _ := w.(http.Flusher)
+		if slowOnce.CompareAndSwap(false, true) {
+			// First connection: trickle 8 KiB roughly every 60 ms (~133 KiB/s),
+			// well under the 1 MiB/s floor but never silent, so only the
+			// min-speed check (not the stall timeout) can abort it.
+			for pos := start; pos <= end; {
+				next := pos + 8<<10
+				if next > end+1 {
+					next = end + 1
+				}
+				if _, err := w.Write(data[pos:next]); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				pos = next
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(60 * time.Millisecond):
+				}
+			}
+			return
+		}
+		_, _ = w.Write(data[start : end+1])
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	var logBuf bytes.Buffer
+	bar := progress.New(&logBuf, int64(len(data)), "download")
+	d := Downloader{
+		Client: hub.New(server.URL, "", 5*time.Second), Root: root,
+		StateDir: filepath.Join(root, ".metadata"), Progress: bar,
+		Options: Options{
+			Parts: 1, MultipartThreshold: 1, BufferSize: 32 << 10, Retries: 3,
+			MinSpeed: 1 << 20, MinSpeedWindow: 200 * time.Millisecond, Resume: true,
+		},
+	}
+	remote := hub.RepoFile{Path: "weights/model.bin", Size: int64(len(data)), LFS: &hub.LFSInfo{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))}}
+
+	if _, err := d.Download(context.Background(), "owner/model", "commit", remote); err != nil {
+		t.Fatalf("slow download did not recover: %v", err)
+	}
+	bar.Finish() // stop the render loop before reading the captured log
+	got, err := os.ReadFile(filepath.Join(root, "weights", "model.bin"))
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("recovered file differs: size=%d, err=%v", len(got), err)
+	}
+	if !strings.Contains(logBuf.String(), "reconnecting to resume") {
+		t.Fatalf("expected a visible reconnect log, got: %q", logBuf.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(starts) < 2 {
+		t.Fatalf("expected a reconnect after the slow connection, got range starts %v", starts)
+	}
+	resumed := false
+	for _, start := range starts[1:] {
+		if start > 0 {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatalf("no resumed (non-zero) range after the slow abort: %v", starts)
 	}
 }

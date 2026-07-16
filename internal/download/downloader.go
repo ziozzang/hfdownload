@@ -29,7 +29,18 @@ type Options struct {
 	MultipartThreshold int64
 	BufferSize         int
 	Retries            int
-	Resume             bool
+	// StallTimeout aborts and retries a range whose stream delivers no bytes
+	// for this long. Zero disables stall detection (a hung connection then
+	// blocks until the OS or server tears it down).
+	StallTimeout time.Duration
+	// MinSpeed aborts and retries a range (connection) whose average throughput
+	// stays below this many bytes per second over MinSpeedWindow. Because each
+	// segment is a separate connection, the floor is per-connection. Zero
+	// disables the check.
+	MinSpeed int64
+	// MinSpeedWindow is the averaging window for MinSpeed. Zero uses 5s.
+	MinSpeedWindow time.Duration
+	Resume         bool
 }
 
 type Hashes struct {
@@ -252,6 +263,13 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 	if retries < 0 {
 		retries = 0
 	}
+	stallTimeout := d.Options.StallTimeout
+	minSpeed := d.Options.MinSpeed
+	minSpeedWindow := d.Options.MinSpeedWindow
+	if minSpeedWindow <= 0 {
+		minSpeedWindow = 5 * time.Second
+	}
+	rawURL := d.Client.DownloadURL(d.RepoType, repoID, commitSHA, remotePath)
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
 		start, end := t.bounds(index)
@@ -266,74 +284,192 @@ func (d *Downloader) downloadSegment(ctx context.Context, f *os.File, repoID, co
 			case <-time.After(delay):
 			}
 		}
-		req, err := d.Client.NewDownloadRequest(ctx, d.Client.DownloadURL(d.RepoType, repoID, commitSHA, remotePath), start, end)
-		if err != nil {
-			return err
+
+		// Each attempt runs under its own cancelable context so a stall
+		// watchdog can tear down a hung or crawling connection; the retry loop
+		// then resumes from the tracker's last offset. Parent-context
+		// cancellation (user interrupt) still propagates and stays terminal.
+		attemptCtx, cancel := context.WithCancel(ctx)
+		var lastData, attemptBytes atomic.Int64
+		var stalled, slow atomic.Bool
+		guardStop := make(chan struct{})
+		guardExit := make(chan struct{})
+		if stallTimeout > 0 || minSpeed > 0 {
+			lastData.Store(time.Now().UnixNano())
+			go watchAttempt(stallTimeout, minSpeedWindow, minSpeed, &lastData, &attemptBytes, &stalled, &slow, cancel, guardStop, guardExit)
+		} else {
+			close(guardExit)
 		}
-		resp, err := d.Client.HTTP.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusPartialContent {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("range %d-%d: HTTP %s: %s", start, end, resp.Status, strings.TrimSpace(string(body)))
-			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
-				return lastErr
+
+		done, err := func() (bool, error) {
+			req, err := d.Client.NewDownloadRequest(attemptCtx, rawURL, start, end)
+			if err != nil {
+				return false, err
 			}
-			continue
-		}
-		if err := validateContentRange(resp.Header.Get("Content-Range"), start, end); err != nil {
-			_ = resp.Body.Close()
-			return err
-		}
-		pos := start
-		for pos <= end {
-			want := int64(len(buf))
-			if remaining := end - pos + 1; remaining < want {
-				want = remaining
+			resp, err := d.Client.HTTP.Do(req)
+			if err != nil {
+				lastErr = err
+				return false, nil
 			}
-			n, readErr := resp.Body.Read(buf[:want])
-			if n > 0 {
-				written, writeErr := f.WriteAt(buf[:n], pos)
-				if writeErr != nil {
-					_ = resp.Body.Close()
-					return writeErr
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusPartialContent {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+				lastErr = fmt.Errorf("range %d-%d: HTTP %s: %s", start, end, resp.Status, strings.TrimSpace(string(body)))
+				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+					return false, lastErr
 				}
-				if written != n {
-					_ = resp.Body.Close()
-					return io.ErrShortWrite
+				return false, nil
+			}
+			if err := validateContentRange(resp.Header.Get("Content-Range"), start, end); err != nil {
+				return false, err
+			}
+			pos := start
+			for pos <= end {
+				want := int64(len(buf))
+				if remaining := end - pos + 1; remaining < want {
+					want = remaining
 				}
-				pos += int64(n)
-				if err := t.update(index, pos, false); err != nil {
-					_ = resp.Body.Close()
-					return err
+				n, readErr := resp.Body.Read(buf[:want])
+				if n > 0 {
+					if stallTimeout > 0 {
+						lastData.Store(time.Now().UnixNano())
+					}
+					if minSpeed > 0 {
+						attemptBytes.Add(int64(n))
+					}
+					written, writeErr := f.WriteAt(buf[:n], pos)
+					if writeErr != nil {
+						return false, writeErr
+					}
+					if written != n {
+						return false, io.ErrShortWrite
+					}
+					pos += int64(n)
+					if err := t.update(index, pos, false); err != nil {
+						return false, err
+					}
+					bar.Add(int64(n))
+					contribution.Add(int64(n))
+					if d.OnNetworkBytes != nil {
+						d.OnNetworkBytes(int64(n))
+					}
 				}
-				bar.Add(int64(n))
-				contribution.Add(int64(n))
-				if d.OnNetworkBytes != nil {
-					d.OnNetworkBytes(int64(n))
+				if readErr != nil {
+					if errors.Is(readErr, io.EOF) && pos > end {
+						break
+					}
+					lastErr = readErr
+					return false, nil
 				}
 			}
-			if readErr != nil {
-				if errors.Is(readErr, io.EOF) && pos > end {
-					break
+			if pos > end {
+				if err := t.update(index, pos, true); err != nil {
+					return false, err
 				}
-				lastErr = readErr
-				break
+				return true, nil
 			}
-		}
-		_ = resp.Body.Close()
-		if pos > end {
-			if err := t.update(index, pos, true); err != nil {
-				return err
-			}
+			return false, nil
+		}()
+
+		close(guardStop)
+		<-guardExit
+		cancel()
+
+		if done {
 			return nil
+		}
+		// A cancelled parent context (interrupt) is terminal; a stall abort is not.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if stalled.Load() || slow.Load() {
+			reason := fmt.Sprintf("stalled: no data for %s", stallTimeout)
+			if slow.Load() {
+				reason = fmt.Sprintf("too slow: below %s over %s", humanRate(minSpeed), minSpeedWindow)
+			}
+			lastErr = fmt.Errorf("range %d-%d %s", start, end, reason)
+			resumeAt, _ := t.bounds(index)
+			if attempt < retries {
+				bar.Logf("%s: range %d-%d %s; reconnecting to resume at %s\n", remotePath, start, end, reason, formatSize(resumeAt))
+			}
 		}
 	}
 	return fmt.Errorf("download %q segment %d failed after %d attempt(s): %w", remotePath, index+1, retries+1, lastErr)
 }
+
+// watchAttempt aborts an attempt that either makes no progress for stallTimeout
+// (stall) or averages below minSpeed bytes/second over minSpeedWindow (too slow).
+// It polls the shared progress counters and cancels the attempt context on the
+// first tripped condition, recording the reason so the caller can distinguish an
+// abort from a genuine error and retry with resume. It exits promptly when the
+// caller closes stop (attempt finished), signalling completion by closing exit.
+// Either check is skipped when its threshold is zero.
+func watchAttempt(stallTimeout, minSpeedWindow time.Duration, minSpeed int64, lastData, received *atomic.Int64, stalled, slow *atomic.Bool, cancel context.CancelFunc, stop <-chan struct{}, exit chan<- struct{}) {
+	defer close(exit)
+	ticker := time.NewTicker(watchInterval(stallTimeout, minSpeedWindow, minSpeed))
+	defer ticker.Stop()
+	windowStart := time.Now()
+	windowBytes := received.Load()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if stallTimeout > 0 && time.Since(time.Unix(0, lastData.Load())) >= stallTimeout {
+				stalled.Store(true)
+				cancel()
+				return
+			}
+			if minSpeed > 0 {
+				if elapsed := time.Since(windowStart); elapsed >= minSpeedWindow {
+					if float64(received.Load()-windowBytes)/elapsed.Seconds() < float64(minSpeed) {
+						slow.Store(true)
+						cancel()
+						return
+					}
+					windowStart = time.Now()
+					windowBytes = received.Load()
+				}
+			}
+		}
+	}
+}
+
+// watchInterval picks a polling period fine enough for whichever checks are
+// enabled, clamped to a sane range.
+func watchInterval(stallTimeout, minSpeedWindow time.Duration, minSpeed int64) time.Duration {
+	interval := time.Second
+	if stallTimeout > 0 && stallTimeout/4 < interval {
+		interval = stallTimeout / 4
+	}
+	if minSpeed > 0 && minSpeedWindow/4 < interval {
+		interval = minSpeedWindow / 4
+	}
+	if interval < 5*time.Millisecond {
+		interval = 5 * time.Millisecond
+	}
+	return interval
+}
+
+// formatSize renders a byte count with a binary unit for human-readable logs.
+func formatSize(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+// humanRate renders a bytes-per-second threshold for human-readable logs.
+func humanRate(b int64) string { return formatSize(b) + "/s" }
 
 func newPartialState(repoType hub.RepoType, repoID, commitSHA string, remote hub.RepoFile, parts int) *state.PartialState {
 	ps := &state.PartialState{Version: 1, RepoType: string(repoType), RepoID: repoID, CommitSHA: commitSHA, Path: remote.Path, Size: remote.Size, RemoteBlobSHA1: remote.BlobID}

@@ -106,7 +106,7 @@ func (b *Bar) render(final bool) {
 	}
 	b.lastDone = done
 	b.lastVersion = version
-	if done > b.total && b.total >= 0 {
+	if b.total > 0 && done > b.total {
 		done = b.total
 	}
 	b.labelMu.RLock()

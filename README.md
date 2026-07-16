@@ -13,6 +13,7 @@ with HTTP Range requests, and verifies them against Git blob or Git LFS hashes.
 - Model and dataset repositories, pinned to a resolved commit SHA
 - Full-repository or case-insensitive glob-filtered downloads
 - Multipart HTTP Range downloads with resume enabled by default
+- Automatic reconnection that drops and resumes stalled or too-slow connections
 - Constant-size I/O buffers; files are never held entirely in memory
 - Git blob SHA-1 or Git LFS SHA-256 verification for every downloaded file
 - Raw local SHA-256 and SHA-1 entries in `.sha256` and `.sha1sum`
@@ -151,6 +152,9 @@ unselected files are retained in the manifest and checksum files.
 - `--resume=true`: resume compatible partial downloads
 - `--buffer-size 1MiB`: memory buffer used by each active range
 - `--retries 5`: retry count for each range
+- `--stall-timeout 60`: reconnect and resume a range after this many seconds without progress; `0` disables stall detection
+- `--min-speed 1MiB`: reconnect and resume a range (connection) that averages below this rate over a short window; `0` disables the floor. With `--parts N` the floor is per connection, so the whole-file rate can be up to `N ×` this value
+- `--min-speed-window 5`: averaging window (seconds) used by `--min-speed`; a shorter window reacts faster but is more sensitive to brief dips
 - `--token-env HF_TOKEN`: environment variable containing the token
 - `--token TOKEN`: direct token value
 
@@ -231,6 +235,11 @@ Resume mode is enabled by default.
 - If resumed bytes fail the hash, that file is retried once from byte zero.
 - Unchanged files with valid manifest records are not re-read.
 - Files without a current validation record are scanned once before download.
+- A connection that goes silent for `--stall-timeout` seconds, or that averages
+  below `--min-speed` over `--min-speed-window` seconds, is dropped and resumed
+  on a fresh connection from the last received offset. Each reconnect prints a
+  line such as `... too slow: below 1.0 MiB/s over 5s; reconnecting to resume at
+  128.0 MiB`. A file gives up only after `--retries` reconnects all fail.
 
 ## Progress display
 
@@ -336,6 +345,9 @@ configuration values.
   "buffer_size": 1048576,
   "retries": 5,
   "timeout_seconds": 30,
+  "stall_timeout_seconds": 60,
+  "min_speed": 0,
+  "min_speed_window_seconds": 5,
   "resume": true,
   "token_env": "HF_TOKEN"
 }

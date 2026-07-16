@@ -14,6 +14,7 @@ Created by Jioh L. Jung <ziozzang@gmail.com> — [GitHub](https://github.com/zio
 - 모델 및 데이터셋 리포지터리를 확정된 커밋 SHA 기준으로 다운로드
 - 리포 전체 다운로드 또는 대소문자를 구분하지 않는 glob 파일 필터
 - 기본 활성화된 이어받기와 HTTP Range 분할 다운로드
+- 정지되거나 지나치게 느린 연결을 끊고 이어받는 자동 재연결
 - 고정 크기 I/O 버퍼 사용; 파일 전체를 메모리에 올리지 않음
 - 파일별 Git blob SHA-1 또는 Git LFS SHA-256 검증
 - 받은 모든 파일의 raw SHA-256과 SHA-1을 `.sha256`, `.sha1sum`에 저장
@@ -151,6 +152,9 @@ hfdown d \
 - `--resume=true`: 호환되는 임시 다운로드 이어받기
 - `--buffer-size 1MiB`: 활성 Range 하나가 사용하는 메모리 버퍼
 - `--retries 5`: Range별 재시도 횟수
+- `--stall-timeout 60`: 이 초 이상 진행이 없으면 연결을 끊고 해당 Range를 이어받기로 재시도; `0`이면 정지 감지 비활성화
+- `--min-speed 1MiB`: 짧은 측정 구간 평균 속도가 이 값 미만인 Range(연결)를 끊고 이어받기로 재시도; `0`이면 비활성화. `--parts N` 사용 시 연결별 하한이므로 전체 속도는 최대 `N ×` 이 값까지 될 수 있음
+- `--min-speed-window 5`: `--min-speed`가 평균을 재는 구간(초); 짧을수록 반응이 빠르지만 순간적 속도 저하에 민감
 - `--token-env HF_TOKEN`: 토큰을 담은 환경 변수 이름
 - `--token TOKEN`: 토큰 직접 전달
 
@@ -231,6 +235,11 @@ hfdown batch --queue queue.json --continue-on-error
   다시 받습니다.
 - 유효한 manifest 기록이 있고 변경되지 않은 파일은 다시 읽지 않습니다.
 - 현재 검증 기록이 없는 파일은 다운로드 여부를 정하기 전에 한 번 검사합니다.
+- `--stall-timeout`초 동안 데이터가 오지 않거나, `--min-speed-window`초 평균
+  속도가 `--min-speed` 미만인 연결은 끊고 새 연결에서 마지막 수신 위치부터
+  이어받습니다. 재연결마다 `... too slow: below 1.0 MiB/s over 5s;
+  reconnecting to resume at 128.0 MiB` 같은 줄이 출력되며, `--retries`회
+  재연결이 모두 실패해야 그 파일을 포기합니다.
 
 ## 진행률 표시
 
@@ -331,6 +340,9 @@ sha1sum -c .sha1sum
   "buffer_size": 1048576,
   "retries": 5,
   "timeout_seconds": 30,
+  "stall_timeout_seconds": 60,
+  "min_speed": 0,
+  "min_speed_window_seconds": 5,
   "resume": true,
   "token_env": "HF_TOKEN"
 }
