@@ -103,6 +103,35 @@ func TestCacheExportImportRoundTrip(t *testing.T) {
 	if err := run(context.Background(), []string{"verify", "--output", imported, "--force"}); err != nil {
 		t.Fatalf("imported repository failed verification: %v", err)
 	}
+
+	// cache-list and cache-verify operate on the cache with no manifest.
+	if err := run(context.Background(), []string{"cache-list", "--cache", cacheRoot}); err != nil {
+		t.Fatalf("cache-list: %v", err)
+	}
+	if err := run(context.Background(), []string{"cache-verify", "--cache", cacheRoot}); err != nil {
+		t.Fatalf("cache-verify: %v", err)
+	}
+
+	// cache-export --archive writes a tar bundle plus its checksum.
+	archive := filepath.Join(base, "bundle.tar")
+	if err := run(context.Background(), []string{"cache-export", "--output", flat, "--cache", cacheRoot, "--archive", archive}); err != nil {
+		t.Fatalf("cache-export --archive: %v", err)
+	}
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("archive missing: %v", err)
+	}
+	if _, err := os.Stat(archive + ".sha256"); err != nil {
+		t.Fatalf("archive checksum missing: %v", err)
+	}
+
+	// cache-import-batch restores every repo in the cache at once.
+	batch := filepath.Join(base, "batch")
+	if err := run(context.Background(), []string{"cache-import-batch", "--cache", cacheRoot, "--output-root", batch}); err != nil {
+		t.Fatalf("cache-import-batch: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(batch, "owner_cacherepo", "config.json")); err != nil || string(got) != string(cfg) {
+		t.Fatalf("batch-imported config.json differs: %v", err)
+	}
 }
 
 func sha256Hex(b []byte) string {

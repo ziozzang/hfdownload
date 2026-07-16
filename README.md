@@ -325,6 +325,19 @@ export HF_HOME=/path/to/huggingface        # parent of the hub/ directory
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 ```
 
+Related cache utilities:
+
+- `hfdown cache-list --cache DIR` lists the repositories stored in a cache.
+- `hfdown cache-verify --cache DIR [--repo OWNER/NAME]` rehashes every blob and
+  checks it against its content-addressed name. It needs no manifest, so it
+  validates a cache received across an air gap on its own.
+- `hfdown cache-import-batch --cache DIR --output-root OUT` imports every
+  repository in a cache into flat directories at once. Import is resumable — an
+  already-present, correct file is reused rather than re-copied.
+- `hfdown cache-export --archive repo.tar` additionally writes a `.tar` bundle
+  (and `repo.tar.sha256`) of the exported repository for transfer on physical
+  media; unpack it under a cache root and it is ready to use.
+
 ## Repository layout
 
 ```text

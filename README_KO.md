@@ -319,6 +319,19 @@ export HF_HOME=/path/to/huggingface        # hub/ 의 상위 디렉터리
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 ```
 
+관련 캐시 유틸리티:
+
+- `hfdown cache-list --cache DIR` — 캐시에 저장된 리포지터리 목록 표시.
+- `hfdown cache-verify --cache DIR [--repo OWNER/NAME]` — 각 blob을 재해시하여
+  content-addressed 이름과 대조. manifest가 없어도 되므로 air-gap으로 반입한
+  캐시를 그 자체로 검증할 수 있습니다.
+- `hfdown cache-import-batch --cache DIR --output-root OUT` — 캐시의 모든
+  리포지터리를 평면 디렉터리로 한 번에 가져오기. import는 재개 가능 — 이미
+  올바르게 존재하는 파일은 다시 복사하지 않고 재사용합니다.
+- `hfdown cache-export --archive repo.tar` — 내보낸 리포지터리의 `.tar` 번들(및
+  `repo.tar.sha256`)을 함께 생성하여 물리 매체로 전송. 캐시 루트 아래에 풀면
+  바로 사용 가능합니다.
+
 ## 저장 구조
 
 ```text

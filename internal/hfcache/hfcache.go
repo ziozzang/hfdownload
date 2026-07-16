@@ -320,24 +320,13 @@ func Import(opts ImportOptions) (*state.Manifest, ImportResult, error) {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		hashes, err := copyAndHash(path, dst, st.Size(), opts.BufferSize)
+		// The blob name is the etag; the transferred bytes must match it.
+		etag := blobName(path)
+		hashes, err := importFile(path, dst, st.Size(), etag, opts.BufferSize)
 		if err != nil {
 			return fmt.Errorf("%s: %w", relSlash, err)
 		}
-		// The blob name is the etag; verify the transferred bytes match it.
-		etag := blobName(path)
-		isLFS := false
-		switch {
-		case isHex(etag, 64):
-			isLFS = true
-			if !strings.EqualFold(etag, hashes.SHA256) {
-				return fmt.Errorf("%s: content does not match blob %s (SHA-256 %s)", relSlash, etag, hashes.SHA256)
-			}
-		case isHex(etag, 40):
-			if !strings.EqualFold(etag, hashes.GitSHA1) {
-				return fmt.Errorf("%s: content does not match blob %s (git SHA-1 %s)", relSlash, etag, hashes.GitSHA1)
-			}
-		}
+		isLFS := isHex(etag, 64)
 		rec := &state.FileRecord{
 			Path: relSlash, Size: st.Size(),
 			RemoteBlobSHA1: hashes.GitSHA1,
@@ -394,6 +383,39 @@ func fileModNano(path string) int64 {
 		return st.ModTime().UnixNano()
 	}
 	return 0
+}
+
+// importFile materializes one snapshot file at dst and returns its hashes. If a
+// correct copy is already present (same size and matching etag), it is reused —
+// making import resumable — otherwise the source is streamed and verified.
+func importFile(src, dst string, size int64, etag string, bufSize int) (download.Hashes, error) {
+	if st, err := os.Stat(dst); err == nil && st.Size() == size {
+		if h, err := download.HashFileSelective(dst, size, bufSize, nil, true); err == nil && etagMatches(etag, h) {
+			return h, nil
+		}
+	}
+	h, err := copyAndHash(src, dst, size, bufSize)
+	if err != nil {
+		return download.Hashes{}, err
+	}
+	if !etagMatches(etag, h) {
+		return download.Hashes{}, fmt.Errorf("content does not match blob %s", etag)
+	}
+	return h, nil
+}
+
+// etagMatches reports whether hashes are consistent with a content-addressed
+// blob name (SHA-256 for 64-hex, git SHA-1 for 40-hex). An unrecognized etag
+// (e.g. a plain-copied snapshot with no symlink) is accepted.
+func etagMatches(etag string, h download.Hashes) bool {
+	switch {
+	case isHex(etag, 64):
+		return strings.EqualFold(etag, h.SHA256)
+	case isHex(etag, 40):
+		return strings.EqualFold(etag, h.GitSHA1)
+	default:
+		return true
+	}
 }
 
 // copyAndHash streams src to dst once, computing the SHA-256, SHA-1, and git

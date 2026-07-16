@@ -37,6 +37,12 @@ func helpCommand(ctx context.Context, args []string) error {
 		err = cacheExportCommand([]string{"-h"})
 	case "cache-import":
 		err = cacheImportCommand([]string{"-h"})
+	case "cache-import-batch":
+		err = cacheImportBatchCommand([]string{"-h"})
+	case "cache-list":
+		err = cacheListCommand([]string{"-h"})
+	case "cache-verify":
+		err = cacheVerifyCommand([]string{"-h"})
 	case "version":
 		printVersion(os.Stdout)
 		return nil
@@ -67,6 +73,9 @@ Commands:
   status             Show stored repository status and revision
   cache-export       Convert a download into the Hugging Face cache layout
   cache-import       Convert a Hugging Face cache snapshot into a flat directory
+  cache-import-batch Import every repository from a Hugging Face cache
+  cache-list         List repositories stored in a Hugging Face cache
+  cache-verify       Rehash cached blobs against their content-addressed names
   version            Print version and target platform
   help               Show general or command-specific help
 
