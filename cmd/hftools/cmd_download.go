@@ -38,6 +38,7 @@ func repositoryCommand(ctx context.Context, args []string, repoType hub.RepoType
 	var repo string
 	fs.StringVar(&repo, "repo", "", "Hugging Face repository ID or URL")
 	fs.StringVar(&cfg.Output, "output", cfg.Output, "destination directory (default: <owner>_<repo>)")
+	cfg.Sign = homeAutoSign()
 	addTransferFlags(fs, &cfg, &configPath)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -325,6 +326,11 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	fmt.Fprintf(os.Stderr, "complete: %d files • cached %d (%s) • verified existing %d • downloaded %d • network %s • resumed %s\n",
 		len(files), cachedFiles, humanBytes(skipped), verifiedExisting, downloadedFiles, humanBytes(networkBytes.Load()), humanBytes(resumedBytes.Load()))
 	fmt.Fprintf(os.Stderr, "saved to %s\n", root)
+	if cfg.Sign {
+		if err := autoSignRepo(root, stateDir); err != nil {
+			return fmt.Errorf("auto-sign: %w", err)
+		}
+	}
 	return nil
 }
 

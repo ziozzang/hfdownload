@@ -40,6 +40,8 @@ func parseYAML(data []byte) (*Config, error) {
 			cfg.Signer = value
 		case "key_path":
 			cfg.KeyPath = value
+		case "auto_sign":
+			cfg.AutoSign = parseBool(value)
 		case "trusted_keys":
 			if value != "" && value != "{}" {
 				return nil, fmt.Errorf("line %d: trusted_keys must be a nested map", i+1)
@@ -79,6 +81,15 @@ func stripInlineComment(v string) string {
 	return v
 }
 
+func parseBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "yes", "on", "1":
+		return true
+	default:
+		return false
+	}
+}
+
 func unquote(v string) string {
 	if len(v) >= 2 {
 		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
@@ -96,6 +107,12 @@ func marshalYAML(c *Config) []byte {
 	b.WriteString("signer: " + yamlScalar(c.Signer) + "\n")
 	if strings.TrimSpace(c.KeyPath) != "" {
 		b.WriteString("key_path: " + yamlScalar(c.KeyPath) + "\n")
+	}
+	b.WriteString("# auto_sign: sign every download/verify with this identity (also: --sign / --sign=false)\n")
+	if c.AutoSign {
+		b.WriteString("auto_sign: true\n")
+	} else {
+		b.WriteString("auto_sign: false\n")
 	}
 	b.WriteString("\ntrusted_keys:\n")
 	names := make([]string, 0, len(c.TrustedKeys))

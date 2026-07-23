@@ -29,6 +29,7 @@ const (
 type Config struct {
 	Signer      string            // label recorded in signatures (e.g. an email)
 	KeyPath     string            // private key path; ~ is expanded, blank means the default
+	AutoSign    bool              // sign every download/verify with the home identity by default
 	TrustedKeys map[string]string // name -> hex-encoded ed25519 public key
 }
 

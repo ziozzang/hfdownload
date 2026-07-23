@@ -47,7 +47,7 @@ func keyUsage(w *os.File) {
 	fmt.Fprintln(w, `hftools key - manage the ~/.hftools signing identity
 
 Usage:
-  hftools key init [--signer LABEL] [--force]   Create the signing keypair
+  hftools key init [--signer LABEL] [--auto-sign] [--force]   Create the signing keypair
   hftools key show                              Print this machine's public key and fingerprint
   hftools key export [--out FILE]               Write the public key (PEM) to distribute
   hftools key trust <name> <pubkey|file>        Trust a signer's public key by name
@@ -57,7 +57,10 @@ Usage:
 
 Keys live under ~/.hftools (override with HFTOOLS_HOME). Distribute the public
 key out-of-band; recipients run "hftools key trust <name> <pubkey>" once, then
-"hftools verify-sig" recognizes your signatures automatically.`)
+"hftools verify-sig" recognizes your signatures automatically.
+
+With --auto-sign (config.yaml auto_sign), every download, batch, and verify signs
+the repository automatically; toggle per run with --sign / --sign=false.`)
 }
 
 func keyInit(args []string) error {
@@ -65,6 +68,7 @@ func keyInit(args []string) error {
 	fs.SetOutput(os.Stderr)
 	signer := fs.String("signer", "", "signer label recorded in signatures (e.g. an email)")
 	force := fs.Bool("force", false, "overwrite an existing identity key")
+	autoSign := fs.Bool("auto-sign", false, "sign every download and verify with this identity by default")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,12 +105,18 @@ func keyInit(args []string) error {
 	if *signer != "" {
 		cfg.Signer = *signer
 	}
+	if *autoSign {
+		cfg.AutoSign = true
+	}
 	if err := cfg.Save(); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "created signing identity\n  private key: %s (keep secret)\n", keyPath)
 	if cfg.Signer != "" {
 		fmt.Fprintf(os.Stderr, "  signer:      %s\n", cfg.Signer)
+	}
+	if cfg.AutoSign {
+		fmt.Fprintf(os.Stderr, "  auto-sign:   on (every download and verify will be signed)\n")
 	}
 	fmt.Fprintf(os.Stderr, "  fingerprint: %s\n", sign.Fingerprint(pub))
 	fmt.Fprintf(os.Stderr, "\nshare your public key so others can verify your signatures:\n")
@@ -141,6 +151,9 @@ func keyShow(args []string) error {
 		fmt.Fprintf(os.Stderr, "signer:      %s\n", cfg.Signer)
 	}
 	fmt.Fprintf(os.Stderr, "key:         %s\n", keyPath)
+	if cfg.AutoSign {
+		fmt.Fprintf(os.Stderr, "auto-sign:   on\n")
+	}
 	fmt.Fprintf(os.Stderr, "fingerprint: %s\n", sign.Fingerprint(pub))
 	fmt.Println(sign.PublicKeyHex(pub))
 	if *pemOut {

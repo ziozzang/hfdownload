@@ -23,6 +23,7 @@ func batchCommand(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	var queuePath, listPath, outputRoot, defaultRepoType string
 	var continueOnError bool
+	cfg.Sign = homeAutoSign()
 	addTransferFlags(fs, &cfg, &configPath)
 	fs.StringVar(&queuePath, "queue", "", "JSON queue or line-based repository list")
 	fs.StringVar(&listPath, "list", "", "line-based repository list (';' comments and blank lines allowed)")

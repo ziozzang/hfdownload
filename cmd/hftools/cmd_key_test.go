@@ -64,6 +64,47 @@ func TestSignVerifyRoundTripWithHomeIdentity(t *testing.T) {
 	}
 }
 
+// TestAutoSignRepoHook exercises the shared hook behind --sign / auto_sign:
+// it creates the home identity on first use, signs a repo's .sha256, and the
+// resulting signature verifies.
+func TestAutoSignRepoHook(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HFTOOLS_HOME", home)
+
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".sha256"), []byte("# hftools SHA-256\nabc  model.bin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(repo, ".metadata")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := autoSignRepo(repo, stateDir); err != nil {
+		t.Fatalf("autoSignRepo: %v", err)
+	}
+	for _, p := range []string{filepath.Join(stateDir, "signature.json"), filepath.Join(repo, ".sha256.sig"), filepath.Join(home, "signing.key")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected %s: %v", p, err)
+		}
+	}
+	if err := verifySigCommand([]string{"--output", repo}); err != nil {
+		t.Fatalf("verify-sig after auto-sign: %v", err)
+	}
+
+	// config.yaml auto_sign toggled by `key init --auto-sign` drives homeAutoSign.
+	t.Setenv("HFTOOLS_HOME", t.TempDir())
+	if homeAutoSign() {
+		t.Fatalf("auto-sign should be off before init")
+	}
+	if err := keyCommand([]string{"init", "--auto-sign"}); err != nil {
+		t.Fatalf("key init --auto-sign: %v", err)
+	}
+	if !homeAutoSign() {
+		t.Fatalf("auto-sign should be on after `key init --auto-sign`")
+	}
+}
+
 func TestKeyInitRefusesOverwriteWithoutForce(t *testing.T) {
 	t.Setenv("HFTOOLS_HOME", t.TempDir())
 	if err := keyCommand([]string{"init", "--signer", "a@b.c"}); err != nil {

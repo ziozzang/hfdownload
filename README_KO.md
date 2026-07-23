@@ -522,6 +522,22 @@ hftools verify-sig --output ./owner_model --pubkey alice   # 또는 명시적으
 **무결성(integrity)**만 증명하며, 지문을 보여줘 `hftools key trust`로 신뢰할지
 판단할 수 있게 합니다.
 
+### 자동 서명
+
+`auto_sign`을 켜면 `download`·`dataset`·`space`·`batch`·`verify`/`verify-batch`가
+`.sha256` 매니페스트를 기록하는 순간 자동으로 저장소를 서명합니다 — 별도 `sign`
+단계가 필요 없습니다:
+
+```bash
+hftools key init --signer you@example.com --auto-sign   # config.yaml auto_sign: true 설정
+hftools batch --list models.txt                          # 각 저장소가 내려받는 즉시 서명됨
+hftools verify-batch --root ./repos                       # 검증 통과 시 재서명
+hftools download owner/model --sign=false                 # 이번 실행만 제외
+```
+
+`--sign` / `--sign=false`로 실행마다 config 기본값을 덮어쓸 수 있습니다. 첫 사용 시
+신원(키 + `config.yaml`)이 자동 생성됩니다.
+
 신원은 `hftools key`로 관리합니다: `init`, `show`, `export`, `trust`, `untrust`,
 `list`, `path`.
 

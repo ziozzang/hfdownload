@@ -14,7 +14,7 @@ func TestConfigYAMLRoundTrip(t *testing.T) {
 
 	pub1, _, _ := sign.GenerateKey()
 	pub2, _, _ := sign.GenerateKey()
-	cfg := &Config{Signer: "jung@jioh.net", KeyPath: "~/.hftools/signing.key"}
+	cfg := &Config{Signer: "jung@jioh.net", KeyPath: "~/.hftools/signing.key", AutoSign: true}
 	cfg.Trust("alice", pub1)
 	cfg.Trust("bob", pub2)
 	if err := cfg.Save(); err != nil {
@@ -24,6 +24,9 @@ func TestConfigYAMLRoundTrip(t *testing.T) {
 	got, path, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("load: %v", err)
+	}
+	if !got.AutoSign {
+		t.Fatalf("auto_sign did not round-trip")
 	}
 	if path != filepath.Join(home, ConfigName) {
 		t.Fatalf("unexpected config path %s", path)

@@ -538,6 +538,22 @@ name/hex/PEM/file you supply), it proves **provenance**. With no match it still
 proves the content is unchanged since signing (**integrity**) and shows the
 fingerprint so you can decide whether to `hftools key trust` it.
 
+### Sign automatically
+
+Turn on `auto_sign` and every `download`, `dataset`, `space`, `batch`, and
+`verify`/`verify-batch` signs the repository with your identity the moment its
+`.sha256` manifest is written — no separate `sign` step:
+
+```bash
+hftools key init --signer you@example.com --auto-sign   # sets config.yaml auto_sign: true
+hftools batch --list models.txt                          # each repo is signed as it lands
+hftools verify-batch --root ./repos                       # re-sign on a clean verify
+hftools download owner/model --sign=false                 # opt out for one run
+```
+
+`--sign` / `--sign=false` overrides the config default per run. On first use the
+identity (key + `config.yaml`) is created automatically.
+
 Manage the identity with `hftools key`: `init`, `show`, `export`, `trust`,
 `untrust`, `list`, `path`.
 

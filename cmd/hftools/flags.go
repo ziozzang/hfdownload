@@ -23,6 +23,7 @@ func addTransferFlags(fs *flag.FlagSet, cfg *settings, configPath *string) {
 	fs.IntVar(&cfg.MinSpeedWindowSeconds, "min-speed-window", cfg.MinSpeedWindowSeconds, "averaging window in seconds for --min-speed")
 	fs.BoolVar(&cfg.Resume, "resume", cfg.Resume, "resume compatible partial downloads")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "resolve and print the download plan without transferring")
+	fs.BoolVar(&cfg.Sign, "sign", cfg.Sign, "after a successful download, sign .sha256 with the ~/.hftools identity (default: config.yaml auto_sign; disable with --sign=false)")
 	fs.StringVar(&cfg.Endpoint, "endpoint", cfg.Endpoint, "Hugging Face Hub endpoint")
 	fs.StringVar(&cfg.TokenEnv, "token-env", cfg.TokenEnv, "environment variable containing the access token")
 	fs.StringVar(&cfg.Token, "token", "", "Hugging Face access token (prefer --token-env for security)")

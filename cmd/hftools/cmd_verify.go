@@ -19,12 +19,13 @@ func verifyCommand(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	output := fs.String("output", ".", "downloaded repository directory")
 	force := fs.Bool("force", false, "rehash every file even when metadata is unchanged")
+	sign := fs.Bool("sign", homeAutoSign(), "sign .sha256 with the ~/.hftools identity after a clean verify (default: config.yaml auto_sign)")
 	buffer := int64(1 << 20)
 	fs.Var(byteSizeValue{&buffer}, "buffer-size", "hashing buffer size")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return verifyDirectory(*output, *force, int(buffer))
+	return verifyDirectory(*output, *force, int(buffer), *sign)
 }
 
 func verifyBatchCommand(args []string) error {
@@ -32,6 +33,7 @@ func verifyBatchCommand(args []string) error {
 	rootFlag := fs.String("root", ".", "root directory containing downloaded repositories")
 	force := fs.Bool("force", false, "rehash every file even when metadata is unchanged")
 	failFast := fs.Bool("fail-fast", false, "stop after the first repository verification failure")
+	sign := fs.Bool("sign", homeAutoSign(), "sign each repository's .sha256 with the ~/.hftools identity after a clean verify (default: config.yaml auto_sign)")
 	buffer := int64(1 << 20)
 	fs.Var(byteSizeValue{&buffer}, "buffer-size", "hashing buffer size")
 	if err := fs.Parse(args); err != nil {
@@ -69,7 +71,7 @@ func verifyBatchCommand(args []string) error {
 	var failures []string
 	for i, repositoryDir := range repositories {
 		fmt.Fprintf(os.Stderr, "\n[%d/%d] verifying %s\n", i+1, len(repositories), repositoryDir)
-		if err := verifyDirectory(repositoryDir, *force, int(buffer)); err != nil {
+		if err := verifyDirectory(repositoryDir, *force, int(buffer), *sign); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", repositoryDir, err))
 			if *failFast {
 				break
@@ -83,7 +85,7 @@ func verifyBatchCommand(args []string) error {
 	return nil
 }
 
-func verifyDirectory(output string, force bool, buffer int) error {
+func verifyDirectory(output string, force bool, buffer int, autoSign bool) error {
 	root, err := filepath.Abs(output)
 	if err != nil {
 		return err
@@ -161,6 +163,11 @@ func verifyDirectory(output string, force bool, buffer int) error {
 		}
 		if err := state.WriteSHA1ChecksumFile(filepath.Join(root, ".sha1sum"), m); err != nil {
 			return err
+		}
+		if autoSign {
+			if err := autoSignRepo(root, stateDir); err != nil {
+				return fmt.Errorf("auto-sign: %w", err)
+			}
 		}
 	}
 	fmt.Printf("verify: passed=%d checked=%d cached=%d failed=%d\n", history.Passed, history.Checked, history.Skipped, history.Failed)

@@ -37,8 +37,7 @@ func signCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	payload, err := os.ReadFile(filepath.Join(root, ".sha256"))
-	if err != nil {
+	if _, err := os.ReadFile(filepath.Join(root, ".sha256")); err != nil {
 		return fmt.Errorf("no .sha256 manifest in %s (run download or verify first): %w", root, err)
 	}
 
@@ -101,18 +100,68 @@ func signCommand(args []string) error {
 		}
 	}
 
-	rec := sign.Sign(payload, priv, *signer, time.Now().UTC())
-	if err := state.SaveJSONAtomic(filepath.Join(stateDir, "signature.json"), rec); err != nil {
-		return err
-	}
-	// Also drop a portable copy beside .sha256 so the signature travels with a
-	// flat directory copied across an air gap.
-	if err := state.SaveJSONAtomic(filepath.Join(root, signatureFile), rec); err != nil {
+	rec, err := signManifest(root, stateDir, priv, *signer)
+	if err != nil {
 		return err
 	}
 	pub := priv.Public().(ed25519.PublicKey)
 	fmt.Printf("signed %s\npublic key: %s\nfingerprint: %s\n", root, rec.PublicKey, sign.Fingerprint(pub))
 	fmt.Printf("distribute the public key out-of-band; verify with: hftools verify-sig --output <dir> --pubkey %s\n", rec.PublicKey)
+	return nil
+}
+
+// signManifest signs root/.sha256 with priv and persists the detached signature
+// to stateDir/signature.json and a portable copy at root/.sha256.sig so it
+// travels with a flat directory copied across an air gap.
+func signManifest(root, stateDir string, priv ed25519.PrivateKey, signer string) (sign.Record, error) {
+	payload, err := os.ReadFile(filepath.Join(root, ".sha256"))
+	if err != nil {
+		return sign.Record{}, fmt.Errorf("no .sha256 manifest in %s (run download or verify first): %w", root, err)
+	}
+	rec := sign.Sign(payload, priv, signer, time.Now().UTC())
+	if err := state.SaveJSONAtomic(filepath.Join(stateDir, "signature.json"), rec); err != nil {
+		return rec, err
+	}
+	if err := state.SaveJSONAtomic(filepath.Join(root, signatureFile), rec); err != nil {
+		return rec, err
+	}
+	return rec, nil
+}
+
+// homeAutoSign reports whether config.yaml opts into signing every download and
+// verify by default. Errors resolve to false so a missing/broken config never
+// blocks a transfer.
+func homeAutoSign() bool {
+	cfg, _, err := identity.LoadConfig()
+	if err != nil {
+		return false
+	}
+	return cfg.AutoSign
+}
+
+// autoSignRepo signs a freshly downloaded or verified repository with the
+// ~/.hftools identity, creating that identity on first use. It is the hook
+// behind --sign and config.yaml auto_sign.
+func autoSignRepo(root, stateDir string) error {
+	cfg, _, err := identity.LoadConfig()
+	if err != nil {
+		return err
+	}
+	priv, keyPath, created, err := identity.EnsureKey(cfg)
+	if err != nil {
+		return err
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	if created {
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "created signing identity at %s (fingerprint %s)\n", keyPath, sign.Fingerprint(pub))
+	}
+	if _, err := signManifest(root, stateDir, priv, cfg.Signer); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "signed %s (fingerprint %s)\n", root, sign.Fingerprint(pub))
 	return nil
 }
 
