@@ -120,6 +120,21 @@ func recordCurrent(path string, remote hub.RepoFile, rec *state.FileRecord) bool
 	return err == nil && st.Mode().IsRegular() && st.Size() == rec.Size && st.ModTime().UnixNano() == rec.ModTimeUnixNano
 }
 
+// remoteMatchesRecord reports whether the remote object is still the same one
+// the record was built from, ignoring local disk state. It answers "did upstream
+// change this file?", which recordCurrent cannot: recordCurrent also returns
+// false when the local copy was merely touched or re-created.
+func remoteMatchesRecord(rec *state.FileRecord, remote hub.RepoFile) bool {
+	if rec == nil {
+		return false
+	}
+	lfs := ""
+	if remote.LFS != nil {
+		lfs = remote.LFS.SHA256
+	}
+	return rec.Size == remote.Size && rec.RemoteBlobSHA1 == remote.BlobID && rec.RemoteLFSSHA256 == lfs
+}
+
 func verifyExisting(path string, remote hub.RepoFile, bufferSize int, sharedBar *progress.Bar) (download.Hashes, bool) {
 	st, err := os.Stat(path)
 	if err != nil || !st.Mode().IsRegular() || st.Size() != remote.Size {

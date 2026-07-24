@@ -26,7 +26,8 @@ around the same integrity-first, offline-friendly core.
 - Hub metadata snapshots and append-only update/verification history
 - Plain-text lists and per-job JSON queues
 - Recursive batch verification and forced full rehashing
-- Incremental updates that fetch only remotely changed files
+- Incremental updates that fetch only remotely changed files, report how the
+  revision moved, and optionally `--prune` files deleted upstream
 - Models, datasets, and **Spaces** (`--type space` / the `space` command)
 - Inspect remote repositories without downloading: `info`, `ls`, `diff`, and
   `peek` (read a safetensors/GGUF header via a single Range request)
@@ -37,7 +38,9 @@ around the same integrity-first, offline-friendly core.
 - Reuse an existing `huggingface-cli login` token automatically
 - `get` a single file (to a path or stdout); `dry-run` any download
 - Scan pickle/torch checkpoints for unsafe imports (`scan`)
-- ed25519 provenance signatures over the content manifest (`sign` / `verify-sig`), with a `~/.hftools` signing identity and a trusted-key registry (`key`)
+- ed25519 provenance signatures over the content manifest (`sign` / `verify-sig`),
+  with the signer identity and signing time bound into the signature and shown on
+  every verify, plus a `~/.hftools` signing identity and trusted-key registry (`key`)
 - Storage tools: `du`, `gc`, cross-repo hardlink `dedup`, and HF-cache `cache-gc`
 - `repair` corrupt downloads, `watch` for upstream changes, `doctor` the environment
 - Convert to and from the Hugging Face cache layout for offline / air-gapped use
@@ -355,10 +358,36 @@ the repository); `--verify-sig` verifies each repository's stored signature
 registry). Long scans and verifies are interruptible with **Ctrl+C** (or **ESC**
 / **q** on a terminal).
 
+A signature check reports **who** signed the repository and **when**, so a
+verification leaves an auditable trace of who is answerable for the content:
+
+```
+  sig: OK 0f4095319cd38e03 (trusted: alice)
+       signed by alice@corp.example at 2026-07-17T09:12:44Z
+```
+
+The signer label and timestamp are part of the signed bytes, so editing either
+one in `signature.json` invalidates the signature rather than silently
+misattributing a download. Set your label once with
+`hftools key init --signer you@example.com`.
+
 Run the same download or batch command later to check for an update. The
 requested revision is resolved again, and files are compared by Git blob or
-Git LFS object hash. Only changed files are downloaded. A literal commit SHA
-keeps the download pinned.
+Git LFS object hash — only changed files are downloaded, and the run reports
+how the repository moved:
+
+```
+update: a7121eefebf9 → 71034c5d8bde • 1 new • 1 changed • 8 unchanged • 1 removed upstream
+  removed upstream: generation_config.json
+note: 1 file(s) removed upstream are still on disk; re-run with --prune to delete them
+```
+
+Files that disappeared upstream are dropped from the manifest but left on disk
+unless you pass `--prune`, which deletes them so the directory mirrors the
+revision exactly. Only files this download produced are ever deleted — anything
+you added alongside them is untouched — and `--prune` is ignored when `--filter`
+is in effect, since an unselected file cannot be told apart from a deleted one.
+A literal commit SHA keeps the download pinned.
 
 ## Offline use and the Hugging Face cache
 

@@ -25,7 +25,8 @@ Created by Jioh L. Jung <ziozzang@gmail.com> — [GitHub](https://github.com/zio
 - Hub 메타데이터 스냅샷과 누적 업데이트/검증 이력
 - 단순 텍스트 목록과 작업별 설정이 가능한 JSON 큐
 - 전체 디렉터리 순회 검증과 강제 전수 재해시
-- 원격 객체 해시가 바뀐 파일만 받는 증분 업데이트
+- 원격 객체 해시가 바뀐 파일만 받는 증분 업데이트, 리비전 변화 요약 출력,
+  상류에서 삭제된 파일 정리 옵션(`--prune`)
 - 모델·데이터셋에 더해 **Spaces** 지원(`--type space` / `space` 명령)
 - 다운로드 없이 원격 조사: `info`, `ls`, `diff`, `peek`(safetensors/GGUF 헤더를
   Range 한 번으로 읽음)
@@ -35,7 +36,9 @@ Created by Jioh L. Jung <ziozzang@gmail.com> — [GitHub](https://github.com/zio
 - 기존 `huggingface-cli login` 토큰 자동 사용
 - 단일 파일 받기 `get`(파일 또는 stdout), 모든 다운로드의 `--dry-run`
 - pickle/torch 체크포인트의 위험 import 스캔(`scan`)
-- 콘텐츠 매니페스트에 대한 ed25519 출처 서명(`sign` / `verify-sig`), `~/.hftools` 서명 신원과 신뢰 키 목록(`key`) 포함
+- 콘텐츠 매니페스트에 대한 ed25519 출처 서명(`sign` / `verify-sig`) — 서명자
+  신원과 서명 시각이 서명에 함께 묶이며 verify 시 항상 표시. `~/.hftools` 서명
+  신원과 신뢰 키 목록(`key`) 제공
 - 저장 도구: `du`, `gc`, 리포 간 하드링크 `dedup`, HF 캐시 `cache-gc`
 - 손상 복구 `repair`, 상류 변경 추적 `watch`, 환경 진단 `doctor`
 - 오프라인/air-gapped 사용을 위한 Hugging Face 캐시 구조 상호 변환
@@ -346,9 +349,35 @@ hftools verify-batch --root ./models --scan --verify-sig
 (`--pubkey <이름|hex|PEM|파일>`로 고정하거나 신뢰 키 목록에 의존). 긴 스캔·검증은
 **Ctrl+C**(터미널에서는 **ESC** / **q**)로 중단할 수 있습니다.
 
+서명 검증은 **누가** 언제 서명했는지를 함께 출력합니다. 그래야 그 내용에 대해
+누가 책임을 지는지 감사 추적이 남습니다:
+
+```
+  sig: OK 0f4095319cd38e03 (trusted: alice)
+       signed by alice@corp.example at 2026-07-17T09:12:44Z
+```
+
+서명자 라벨과 서명 시각은 **서명 대상 바이트에 함께 포함**되므로,
+`signature.json`에서 둘 중 하나를 고쳐도 조용히 다른 사람 이름으로 둔갑하지
+않고 서명 검증 자체가 실패합니다. 라벨은
+`hftools key init --signer you@example.com`으로 한 번만 설정하면 됩니다.
+
 나중에 같은 다운로드 명령이나 배치 큐를 다시 실행하면 요청 리비전을 새로
 확정합니다. Git blob 또는 Git LFS 객체 해시를 비교하여 변경된 파일만 다시
-받습니다. 리비전에 커밋 SHA를 직접 지정하면 그 커밋에 고정됩니다.
+받고, 리포가 어떻게 바뀌었는지도 함께 보고합니다:
+
+```
+update: a7121eefebf9 → 71034c5d8bde • 1 new • 1 changed • 8 unchanged • 1 removed upstream
+  removed upstream: generation_config.json
+note: 1 file(s) removed upstream are still on disk; re-run with --prune to delete them
+```
+
+상류에서 삭제된 파일은 매니페스트에서는 빠지지만, `--prune`을 주지 않는 한
+디스크에는 남습니다. `--prune`을 주면 삭제되어 디렉터리가 해당 리비전과 정확히
+일치하게 됩니다. 삭제 대상은 **이 다운로드가 만든 파일뿐**이라 사용자가 따로
+넣어둔 파일은 건드리지 않으며, `--filter` 사용 시에는 필터에서 빠진 파일과
+상류에서 삭제된 파일을 구분할 수 없으므로 `--prune`이 동작하지 않습니다.
+리비전에 커밋 SHA를 직접 지정하면 그 커밋에 고정됩니다.
 
 ## 오프라인 사용과 Hugging Face 캐시
 

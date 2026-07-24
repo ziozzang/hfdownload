@@ -161,7 +161,13 @@ func autoSignRepo(root, stateDir string) error {
 	if _, err := signManifest(root, stateDir, priv, cfg.Signer); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "signed %s (fingerprint %s)\n", root, sign.Fingerprint(pub))
+	if cfg.Signer == "" {
+		// Without a label the signature proves a key held these bytes but not
+		// who that key belongs to, which defeats the point of an audit trail.
+		fmt.Fprintf(os.Stderr, "signed %s (fingerprint %s, no signer label — set one with 'hftools key init --signer you@example.com')\n", root, sign.Fingerprint(pub))
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "signed %s as %s (fingerprint %s)\n", root, cfg.Signer, sign.Fingerprint(pub))
 	return nil
 }
 
@@ -207,19 +213,31 @@ func verifySigCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("signature OK\nsigned by: %s\nfingerprint: %s\n", res.Record.PublicKey, sign.Fingerprint(res.PublicKey))
+	fmt.Printf("signature OK\n%s\n", signerLine(res.Record))
+	fmt.Printf("public key: %s\nfingerprint: %s\n", res.Record.PublicKey, sign.Fingerprint(res.PublicKey))
 	if res.TrustLabel != "" {
 		fmt.Printf("trusted key: %s\n", res.TrustLabel)
 	}
-	if res.Record.Signer != "" {
-		fmt.Printf("signer: %s\n", res.Record.Signer)
-	}
-	fmt.Printf("signed at: %s\n", res.Record.SignedAt.Format(time.RFC3339))
 	if !res.Pinned {
 		fmt.Fprintln(os.Stderr, "note: key not pinned or trusted — this proves the content is unchanged since signing, not who signed it")
 		fmt.Fprintf(os.Stderr, "to trust this signer for future verifications: hftools key trust <name> %s\n", res.Record.PublicKey)
 	}
 	return nil
+}
+
+// signerLine renders who signed a repository and when, so every verification
+// leaves an auditable trace of who is answerable for the content. A v1 signature
+// does not cover these fields, so it is labeled rather than shown as proof.
+func signerLine(rec sign.Record) string {
+	who := rec.Signer
+	if who == "" {
+		who = "(no signer label recorded)"
+	}
+	s := fmt.Sprintf("signed by %s at %s", who, rec.SignedAt.UTC().Format(time.RFC3339))
+	if !rec.MetadataSigned() {
+		s += " — legacy v1 signature: signer and time are not signature-covered"
+	}
+	return s
 }
 
 // sigResult carries the outcome of verifying a repository's stored signature.

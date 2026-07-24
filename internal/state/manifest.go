@@ -27,6 +27,12 @@ type Manifest struct {
 	UpdatedAt           time.Time              `json:"updated_at"`
 	LastVerifiedAt      *time.Time             `json:"last_verified_at,omitempty"`
 	Files               map[string]*FileRecord `json:"files"`
+	// Orphans are files this download produced that the current revision no
+	// longer contains and that are still on disk. They are kept out of Files
+	// (and therefore out of .sha256) because they are not part of the revision,
+	// but remembering them is what lets a later --prune still find and delete
+	// them instead of silently leaving them behind forever.
+	Orphans []string `json:"orphans,omitempty"`
 }
 
 type RepositoryMetadata struct {

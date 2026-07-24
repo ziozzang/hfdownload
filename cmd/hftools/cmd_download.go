@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -95,9 +96,11 @@ func planRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	var total, cachedBytes int64
-	var cachedFiles int
+	var cachedFiles, addedUpstream, changedUpstream int
+	seen := make(map[string]bool, len(files))
 	for _, f := range files {
 		total += f.Size
+		seen[f.Path] = true
 		target, terr := download.SafeTarget(root, f.Path)
 		if terr != nil {
 			return terr
@@ -105,6 +108,12 @@ func planRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		var rec *state.FileRecord
 		if m != nil {
 			rec = m.Files[f.Path]
+			switch {
+			case rec == nil:
+				addedUpstream++
+			case !remoteMatchesRecord(rec, f):
+				changedUpstream++
+			}
 		}
 		if recordCurrent(target, f, rec) {
 			cachedFiles++
@@ -112,6 +121,36 @@ func planRepository(ctx context.Context, cfg settings, repoID string, repoType h
 		}
 	}
 	fmt.Printf("plan for %s@%s\ndestination: %s\ncommit: %s\n", repoID, cfg.Revision, root, info.SHA)
+	if m != nil && m.CommitSHA != "" {
+		if m.CommitSHA == info.SHA {
+			fmt.Printf("local: already at commit %s\n", shortCommit(m.CommitSHA))
+		} else {
+			fmt.Printf("update: %s → %s • %d new • %d changed • %d unchanged\n",
+				shortCommit(m.CommitSHA), shortCommit(info.SHA), addedUpstream, changedUpstream,
+				len(files)-addedUpstream-changedUpstream)
+		}
+		if len(cfg.Filters) == 0 {
+			orphaned := map[string]bool{}
+			for p := range m.Files {
+				if !seen[p] {
+					orphaned[p] = true
+				}
+			}
+			for _, p := range m.Orphans {
+				if !seen[p] {
+					orphaned[p] = true
+				}
+			}
+			var removed []string
+			for p := range orphaned {
+				removed = append(removed, p)
+			}
+			sort.Strings(removed)
+			for _, p := range removed {
+				fmt.Printf("removed upstream: %s (delete with --prune)\n", p)
+			}
+		}
+	}
 	fmt.Printf("files: %d • total: %s • cached: %d (%s) • to download: %d (%s)\n",
 		len(files), humanBytes(total), cachedFiles, humanBytes(cachedBytes), len(files)-cachedFiles, humanBytes(total-cachedBytes))
 	return nil
@@ -196,6 +235,19 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	if err := state.AppendJSONLine(filepath.Join(stateDir, "repository-history.jsonl"), metadataEvent); err != nil {
 		return err
 	}
+	// Capture what the previous sync recorded before the manifest is rewritten,
+	// so the run can report how the repository moved rather than silently
+	// re-syncing.
+	prevCommit := ""
+	prevPaths := map[string]bool{}
+	var carriedOrphans []string
+	if m != nil {
+		prevCommit = m.CommitSHA
+		for p := range m.Files {
+			prevPaths[p] = true
+		}
+		carriedOrphans = m.Orphans
+	}
 	if m == nil {
 		m = state.NewManifest(repoID, cfg.Revision, info.SHA)
 	}
@@ -213,7 +265,7 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 	targets := make(map[string]string, len(files))
 	cachedPlan := make(map[string]bool, len(files))
 	var total, cachedBytes int64
-	var cachedFiles int
+	var cachedFiles, addedUpstream, changedUpstream int
 	for _, f := range files {
 		if seen[f.Path] {
 			return fmt.Errorf("duplicate repository path %q", f.Path)
@@ -225,15 +277,66 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 			return err
 		}
 		targets[f.Path] = target
-		if recordCurrent(target, f, m.Files[f.Path]) {
+		rec := m.Files[f.Path]
+		if prevCommit != "" {
+			switch {
+			case !prevPaths[f.Path]:
+				addedUpstream++
+			case !remoteMatchesRecord(rec, f):
+				changedUpstream++
+			}
+		}
+		if recordCurrent(target, f, rec) {
 			cachedPlan[f.Path] = true
 			cachedFiles++
 			cachedBytes += f.Size
 		}
 	}
+	// Files this download produced that the revision no longer contains: the
+	// ones dropped by this sync plus any carried over from an earlier sync that
+	// were never pruned. Only meaningful without filters, where an unselected
+	// file is indistinguishable from one deleted upstream.
+	var removedUpstream []string
+	if len(cfg.Filters) == 0 {
+		orphaned := map[string]bool{}
+		for p := range prevPaths {
+			if !seen[p] {
+				orphaned[p] = true
+			}
+		}
+		for _, p := range carriedOrphans {
+			// Drop entries the user already deleted by hand so the list
+			// reflects what is actually still on disk.
+			if seen[p] {
+				continue
+			}
+			if target, terr := download.SafeTarget(root, p); terr == nil {
+				if st, serr := os.Stat(target); serr == nil && st.Mode().IsRegular() {
+					orphaned[p] = true
+				}
+			}
+		}
+		for p := range orphaned {
+			removedUpstream = append(removedUpstream, p)
+		}
+		sort.Strings(removedUpstream)
+	}
 	remainingFiles := len(files) - cachedFiles
 	remainingBytes := total - cachedBytes
 	fmt.Fprintf(os.Stderr, "commit %s\n", info.SHA)
+	switch {
+	case prevCommit == "":
+		// First sync into this directory; there is nothing to compare against.
+	case prevCommit == info.SHA:
+		fmt.Fprintf(os.Stderr, "up to date: already at commit %s\n", shortCommit(prevCommit))
+	default:
+		fmt.Fprintf(os.Stderr, "update: %s → %s • %d new • %d changed • %d unchanged • %d removed upstream\n",
+			shortCommit(prevCommit), shortCommit(info.SHA), addedUpstream, changedUpstream,
+			len(files)-addedUpstream-changedUpstream, len(removedUpstream))
+	}
+	for _, p := range removedUpstream {
+		fmt.Fprintf(os.Stderr, "  removed upstream: %s\n", p)
+	}
 	fmt.Fprintf(os.Stderr, "plan: %d files • %s total • %d cached (%s) • %d remaining (%s)\n",
 		len(files), humanBytes(total), cachedFiles, humanBytes(cachedBytes), remainingFiles, humanBytes(remainingBytes))
 	// Persist the current known-good set before network transfer, then refresh it
@@ -310,12 +413,38 @@ func syncRepository(ctx context.Context, cfg settings, repoID string, repoType h
 			return err
 		}
 	}
+	// Drop files the revision no longer contains from the manifest, and with
+	// --prune remove them from disk too so the directory mirrors the revision
+	// exactly. Only manifest-tracked files are ever deleted, so anything the
+	// user added alongside the download is left untouched.
 	if len(cfg.Filters) == 0 {
+		var stillOrphaned []string
+		for _, path := range removedUpstream {
+			if cfg.Prune {
+				target, terr := download.SafeTarget(root, path)
+				if terr != nil {
+					return terr
+				}
+				if rerr := os.Remove(target); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					return fmt.Errorf("prune %s: %w", path, rerr)
+				}
+				fmt.Fprintf(os.Stderr, "pruned %s\n", path)
+			} else {
+				stillOrphaned = append(stillOrphaned, path)
+			}
+			delete(m.Files, path)
+		}
 		for path := range m.Files {
 			if !seen[path] {
 				delete(m.Files, path)
 			}
 		}
+		// Remember what is still lying around so --prune keeps working on a
+		// later run, once these paths are gone from Files.
+		m.Orphans = stillOrphaned
+	}
+	if len(removedUpstream) > 0 && !cfg.Prune {
+		fmt.Fprintf(os.Stderr, "note: %d file(s) removed upstream are still on disk; re-run with --prune to delete them\n", len(removedUpstream))
 	}
 	m.UpdatedAt = time.Now().UTC()
 	if err := saveDownloadCheckpoint(manifestPath, root, m); err != nil {

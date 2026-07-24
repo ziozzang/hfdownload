@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-const version = "0.14.1"
+const version = "0.15.0"
 
 type settings struct {
 	Endpoint              string   `json:"endpoint"`
@@ -33,6 +33,7 @@ type settings struct {
 	Token                 string   `json:"-"`
 	Tag                   string   `json:"-"`
 	DryRun                bool     `json:"-"`
+	Prune                 bool     `json:"prune,omitempty"`
 	Sign                  bool     `json:"-"`
 	Filters               []string `json:"filters,omitempty"`
 }

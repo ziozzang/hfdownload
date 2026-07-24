@@ -180,6 +180,9 @@ func extraRepoChecks(ctx context.Context, root string, doScan, doVerifySig bool,
 				line += " (unpinned — integrity only)"
 			}
 			fmt.Fprintln(os.Stderr, line)
+			// Name who signed it: a verification that does not say who is
+			// answerable for the content cannot support an audit.
+			fmt.Fprintln(os.Stderr, "       "+signerLine(res.Record))
 		}
 	}
 	return errs
